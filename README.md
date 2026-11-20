@@ -1,20 +1,29 @@
 # RustCraft Launcher
 
-RustCraft is an Android-first launcher with a custom block-world interface and
-a Rust core exposed over JNI. It reads Mojang's live version manifest (which
-currently lists release 26.3), downloads the selected version metadata and
-client JAR, verifies Mojang's SHA-1 hashes, and reports download progress.
-Offline profiles, settings, and app-private mod/resource-pack/shader file
-management are also supported.
+RustCraft is an Android-first Minecraft Java launcher maintained in place under
+the existing project name. It has an original Minecraft Vanilla-inspired
+interface, a native Rust core exposed over JNI, offline-profile management,
+the 26.3-only version manifest filter, checksum-verified client downloads,
+live install progress, and app-private add-on folders.
 
-> **Compatibility status:** This repository does not yet launch Minecraft.
-> A Java runtime for Android, game argument/classpath construction, Android
-> graphics/input integration, and native LWJGL support still need to be added.
-> Microsoft/Xbox authentication and Fabric/Forge installation are also not
-> implemented. Microsoft and Ely.by are shown as account choices but sign-in
-> is not configured; no authentication is faked. The installer downloads the
-> client JAR and version metadata only, not the libraries/assets required to
-> run the game. The interface labels these limits explicitly.
+## Honest compatibility status
+
+This build does **not** claim or provide a playable Android port:
+
+- It does not launch Minecraft Java Edition.
+- It does not download or bundle an Android Java runtime.
+- It does not download the complete library and asset graph.
+- It does not integrate Horizon's desktop game engine or UI. Horizon is a
+  LGPL-3.0 Rust/Minecraft project that is not an official Android port; its
+  source currently has no supported Android distribution or launcher backend
+  package for this app to reuse.
+- Microsoft and Ely.by are account choices in the UI, but they are not
+  authenticated account providers in this build.
+- Touch controls and keyboard/mouse switching are only launcher settings/placeholders;
+  they are not connected to a running game.
+- Mods and resource packs have private import/folder-management support only.
+  The app does not browse, resolve loader compatibility, download, activate,
+  or verify them from a marketplace. Forge and Fabric are not falsely enabled.
 
 ## Architecture
 
@@ -64,6 +73,24 @@ before publishing through an app store. Install it with
 `adb install app/build/outputs/apk/release/app-release.apk`.
 
 Rust core tests can be run on a host with `cargo test --manifest-path rust/Cargo.toml`.
+
+## Controls
+
+There is no playable game window in this build, so no touch or keyboard/mouse
+mapping is active. Touch-control size, transparency and enablement preferences
+are saved by the launcher for a future Android Horizon runtime. The controls
+planned for that integration are movement/virtual joystick, jump, sneak,
+sprint, attack, interact and inventory.
+
+## Account behavior
+
+- Offline: creates a local-only profile.
+- Microsoft: launches no fake login and stores no fake token. Official browser
+  OAuth requires a registered Microsoft identity client and Xbox Live/Minecraft
+  entitlement services that are not configured in this project.
+- Ely.by: no credentials are transmitted or stored. Ely.by authentication
+  requires a registered application/API integration and 2FA flow that is not
+  implemented.
 
 ## Storage and downloads
 

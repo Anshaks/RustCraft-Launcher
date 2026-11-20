@@ -146,6 +146,9 @@ private fun RustCraftApp(gameDir: File, notify: (String) -> Unit) {
     var selectedProfile by remember { mutableStateOf("") }
     var accountProvider by remember { mutableStateOf("offline") }
     var reduceMotion by remember { mutableStateOf(false) }
+    var touchControls by remember { mutableStateOf(true) }
+    var touchSize by remember { mutableFloatStateOf(100f) }
+    var touchTransparency by remember { mutableFloatStateOf(70f) }
     var pendingDelete by remember { mutableStateOf<String?>(null) }
     var pendingProfileDelete by remember { mutableStateOf<String?>(null) }
     var versions by remember { mutableStateOf<List<GameVersion>>(emptyList()) }
@@ -321,6 +324,9 @@ private fun RustCraftApp(gameDir: File, notify: (String) -> Unit) {
             val settings = result as? JSONObject
             ram = settings?.optInt("ram_mb", 2048)?.toFloat() ?: 2048f
             reduceMotion = settings?.optBoolean("reduce_motion", false) ?: false
+            touchControls = settings?.optBoolean("touch_controls", true) ?: true
+            touchSize = settings?.optInt("touch_size", 100)?.toFloat() ?: 100f
+            touchTransparency = settings?.optInt("touch_transparency", 70)?.toFloat() ?: 70f
             selectedProfile = settings?.optString("selected_profile").orEmpty()
         }
     }
@@ -389,10 +395,19 @@ private fun RustCraftApp(gameDir: File, notify: (String) -> Unit) {
                         onRamChange = { ram = it },
                         reduceMotion = reduceMotion,
                         onReduceMotion = { reduceMotion = it },
+                        touchControls = touchControls,
+                        onTouchControls = { touchControls = it },
+                        touchSize = touchSize,
+                        onTouchSize = { touchSize = it },
+                        touchTransparency = touchTransparency,
+                        onTouchTransparency = { touchTransparency = it },
                         onSave = {
                             invoke(JSONObject().put("action", "settings")
                                 .put("settings", JSONObject().put("ram_mb", ram.toInt())
-                                    .put("reduce_motion", reduceMotion))) {
+                                    .put("reduce_motion", reduceMotion)
+                                    .put("touch_controls", touchControls)
+                                    .put("touch_size", touchSize.toInt())
+                                    .put("touch_transparency", touchTransparency.toInt()))) {
                                 notify("Settings saved")
                             }
                         },
@@ -718,23 +733,11 @@ private fun VersionsPage(
     onSelect: (String) -> Unit,
     onInstall: () -> Unit,
 ) {
-    val filtered = remember(versions, query) {
-        if (query.isBlank()) versions.take(80)
-        else versions.filter { it.id.contains(query, ignoreCase = true) }.take(100)
-    }
+    val filtered = versions.filter { it.id == "26.3" }
     Column(Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 15.dp)) {
         Text("Versions", fontSize = 27.sp, fontWeight = FontWeight.Bold, color = Ink)
-        Text("Choose a release or snapshot from Mojang.", color = Muted, fontSize = 13.sp)
+        Text("Minecraft Java Edition 26.3 · Vanilla only", color = Muted, fontSize = 13.sp)
         Spacer(Modifier.height(13.dp))
-        OutlinedTextField(
-            value = query,
-            onValueChange = onQuery,
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true,
-            label = { Text("Search versions") },
-            shape = RoundedCornerShape(15.dp),
-        )
-        Spacer(Modifier.height(8.dp))
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FilledTonalButton(onClick = onInstall, enabled = selectedVersion.isNotBlank() && !installing) {
                 Icon(Icons.AutoMirrored.Rounded.ArrowForward, null, modifier = Modifier.size(17.dp))
@@ -895,6 +898,12 @@ private fun SettingsPage(
     onRamChange: (Float) -> Unit,
     reduceMotion: Boolean,
     onReduceMotion: (Boolean) -> Unit,
+    touchControls: Boolean,
+    onTouchControls: (Boolean) -> Unit,
+    touchSize: Float,
+    onTouchSize: (Float) -> Unit,
+    touchTransparency: Float,
+    onTouchTransparency: (Float) -> Unit,
     onSave: () -> Unit,
 ) {
     Column(
@@ -916,6 +925,17 @@ private fun SettingsPage(
                     }
                     Switch(checked = reduceMotion, onCheckedChange = onReduceMotion)
                 }
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Touch controls", color = Ink, fontWeight = FontWeight.Medium)
+                        Text("Saved for a future Android gameplay integration.", color = Muted, fontSize = 11.sp)
+                    }
+                    Switch(checked = touchControls, onCheckedChange = onTouchControls)
+                }
+                Text("Control size · ${touchSize.toInt()}%", color = Ink, fontWeight = FontWeight.Medium)
+                Slider(value = touchSize, onValueChange = onTouchSize, valueRange = 50f..100f, steps = 9)
+                Text("Transparency · ${touchTransparency.toInt()}%", color = Ink, fontWeight = FontWeight.Medium)
+                Slider(value = touchTransparency, onValueChange = onTouchTransparency, valueRange = 20f..100f, steps = 15)
                 Button(onClick = onSave) { Text("Save settings") }
             }
         }

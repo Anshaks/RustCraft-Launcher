@@ -7,7 +7,14 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const MANIFEST_URL: &str = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
-const DOWNLOAD_HOSTS: &[&str] = &["piston-meta.mojang.com", "piston-data.mojang.com"];
+const DOWNLOAD_HOSTS: &[&str] = &[
+    "piston-meta.mojang.com",
+    "piston-data.mojang.com",
+    "libraries.minecraft.net",
+    "resources.download.minecraft.net",
+    "cdn.modrinth.com",
+];
+const VANILLA_VERSION: &str = "26.3";
 
 #[derive(Debug, Deserialize)]
 struct Request {
@@ -34,6 +41,9 @@ struct Settings {
     java_path: Option<String>,
     reduce_motion: Option<bool>,
     selected_profile: Option<String>,
+    touch_controls: Option<bool>,
+    touch_size: Option<u8>,
+    touch_transparency: Option<u8>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -131,21 +141,22 @@ fn get_json(url: &str) -> Result<Value, String> {
 
 fn version_manifest() -> Result<Value, String> {
     let manifest = get_json(MANIFEST_URL)?;
-    let versions = manifest["versions"]
+    let releases: Vec<Value> = manifest["versions"]
         .as_array()
-        .ok_or_else(|| "Mojang version manifest has no version list".to_string())?;
-    let releases: Vec<Value> = versions
+        .unwrap_or(&Vec::new())
         .iter()
-        .map(|v| {
-            json!({
-                "id": v["id"],
-                "type": v["type"],
-                "releaseTime": v["releaseTime"],
-            })
+        .filter(|v| {
+            v["id"].as_str() == Some(VANILLA_VERSION) && v["type"].as_str() == Some("release")
         })
+        .map(|v| json!({ "id": v["id"], "type": "release", "releaseTime": v["releaseTime"] }))
         .collect();
+    if releases.is_empty() {
+        return Err(
+            "Minecraft Java Edition 26.3 is not currently in Mojang's manifest".to_string(),
+        );
+    }
     Ok(json!({
-        "latest": manifest["latest"]["release"],
+        "latest": VANILLA_VERSION,
         "versions": releases
     }))
 }
@@ -277,8 +288,8 @@ fn download_file(
 }
 
 fn install_version(root: &Path, id: &str) -> Result<Value, String> {
-    if !valid_version_id(id) {
-        return Err("Invalid Minecraft version identifier".to_string());
+    if id != VANILLA_VERSION {
+        return Err("Only Minecraft Java Edition 26.3 is supported".to_string());
     }
     set_progress(
         root,
@@ -459,6 +470,23 @@ fn update_settings(root: &Path, settings: &Settings) -> Result<Value, String> {
     }
     if let Some(selected_profile) = &settings.selected_profile {
         current.selected_profile = Some(selected_profile.clone());
+    }
+    if let Some(enabled) = settings.touch_controls {
+        current.touch_controls = Some(enabled);
+    }
+    if let Some(size) = settings.touch_size {
+        if !(50..=100).contains(&size) {
+            return Err("Touch control size must be between 50 and 100 percent".to_string());
+        }
+        current.touch_size = Some(size);
+    }
+    if let Some(transparency) = settings.touch_transparency {
+        if !(20..=100).contains(&transparency) {
+            return Err(
+                "Touch control transparency must be between 20 and 100 percent".to_string(),
+            );
+        }
+        current.touch_transparency = Some(transparency);
     }
     fs::write(
         &path,
@@ -692,6 +720,19 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(response["ok"], false);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn only_26_3_can_be_installed() {
+        let root = std::env::temp_dir().join(format!("rustcraft-version-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let wrong: Value = serde_json::from_str(&dispatch(
+            &json!({"action":"install","root":root,"id":"1.21.11"}).to_string(),
+        ))
+        .unwrap();
+        assert_eq!(wrong["ok"], false);
+        assert!(wrong["error"].as_str().unwrap().contains("26.3"));
         let _ = fs::remove_dir_all(root);
     }
 
