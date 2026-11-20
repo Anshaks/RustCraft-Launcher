@@ -29,8 +29,6 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: android-actions/setup-android@v3
-
       - name: Install Android SDK and ARM64 NDK
         run: |
           yes | sdkmanager --licenses >/dev/null || true
