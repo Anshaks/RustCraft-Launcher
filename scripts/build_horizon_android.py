@@ -14,6 +14,55 @@ ROOT = Path(__file__).resolve().parents[1]
 ANDROID_BUILD_PROFILE = "fast"
 
 BRANDING_REPLACEMENTS = {
+    "packaging/android/java/dev/horizon/android/HorizonActivity.java": [
+        (
+            "@Override protected void onCreate(android.os.Bundle savedInstanceState) {\n"
+            "        loadGame();\n"
+            "        super.onCreate(savedInstanceState);\n"
+            "        applyHighRefreshRate(this, 0);\n"
+            "    }",
+            "private void applyRustCraftImmersive() {\n"
+            "        androidx.core.view.WindowCompat.setDecorFitsSystemWindows(getWindow(), false);\n"
+            "        androidx.core.view.WindowInsetsControllerCompat controller =\n"
+            "                new androidx.core.view.WindowInsetsControllerCompat(getWindow(), getWindow().getDecorView());\n"
+            "        controller.setSystemBarsBehavior(\n"
+            "                androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);\n"
+            "        controller.hide(androidx.core.view.WindowInsetsCompat.Type.systemBars());\n"
+            "    }\n\n"
+            "    @Override protected void onCreate(android.os.Bundle savedInstanceState) {\n"
+            "        loadGame();\n"
+            "        super.onCreate(savedInstanceState);\n"
+            "        applyHighRefreshRate(this, 0);\n"
+            "        applyRustCraftImmersive();\n"
+            "    }",
+        ),
+        (
+            "    @Override protected void onResume() {\n"
+            "        super.onResume();\n"
+            "        applyHighRefreshRate(this, 0);\n"
+            "    }",
+            "    @Override protected void onResume() {\n"
+            "        super.onResume();\n"
+            "        applyHighRefreshRate(this, 0);\n"
+            "        applyRustCraftImmersive();\n"
+            "    }",
+        ),
+        (
+            "    @Override public void onWindowFocusChanged(boolean hasFocus) {\n"
+            "        super.onWindowFocusChanged(hasFocus);\n"
+            "        if (hasFocus) {\n"
+            "            applyHighRefreshRate(this, 0);\n"
+            "        }\n"
+            "    }",
+            "    @Override public void onWindowFocusChanged(boolean hasFocus) {\n"
+            "        super.onWindowFocusChanged(hasFocus);\n"
+            "        if (hasFocus) {\n"
+            "            applyHighRefreshRate(this, 0);\n"
+            "            applyRustCraftImmersive();\n"
+            "        }\n"
+            "    }",
+        ),
+    ],
     "crates/horizon-client/src/android/launcher_pages.rs": [
         (
             '        // ---- Top Header Bar (brand lockup ... account pill) ----\n'
@@ -62,6 +111,32 @@ BRANDING_REPLACEMENTS = {
     "crates/horizon-client/src/android_main.rs": [
         ('pub const VERSION: &str = "1.0.1";', 'pub const VERSION: &str = "1.1.0";'),
     ],
+    "crates/horizon-client/src/android/native_ime.rs": [
+        (
+            "fn apply_screen(&self, env: &mut JNIEnv<'_>, immersive: bool)",
+            "fn apply_screen(&self, env: &mut JNIEnv<'_>, _immersive: bool)",
+        ),
+        (
+            '                    if immersive { "hide" } else { "show" },\n'
+            '                    "(I)V",\n'
+            '                    &[JValue::Int(2)],',
+            '                    "hide",\n'
+            '                    "(I)V",\n'
+            '                    &[JValue::Int(2)],',
+        ),
+        (
+            '&[JValue::Int(if immersive { 0x1706 } else { 0x0704 })],',
+            '&[JValue::Int(0x1706)],',
+        ),
+        (
+            "self.immersive.store(immersive, Ordering::Release);",
+            "self.immersive.store(true, Ordering::Release);",
+        ),
+        (
+            "self.apply_screen(env, immersive)",
+            "self.apply_screen(env, true)",
+        ),
+    ],
 }
 
 
@@ -98,6 +173,13 @@ def restore_branding(changed):
         path.write_text(text.replace(new, old, 1), encoding="utf-8")
 
 
+def stage_java_sources(engine, output):
+    destination = output / "java"
+    shutil.rmtree(destination, ignore_errors=True)
+    shutil.copytree(engine / "packaging/android/java", destination)
+    return destination
+
+
 def stage_engine(engine, output):
     library = engine / f"target/aarch64-linux-android/{ANDROID_BUILD_PROFILE}/libhorizon_android.so"
     if not library.is_file():
@@ -108,6 +190,7 @@ def stage_engine(engine, output):
     shutil.rmtree(output, ignore_errors=True)
     jni.mkdir(parents=True)
     assets.mkdir(parents=True)
+    stage_java_sources(engine, output)
     shutil.copy2(library, jni / "libhorizon_android.so")
 
     build_script = engine / "tools/android_build.py"

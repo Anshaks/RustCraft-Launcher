@@ -3,10 +3,16 @@
 RustCraft is an ARM64-only Android application with an original Compose launcher
 and a native Rust game engine. The launcher opens an integrated Android build
 of [Horizon Android](https://github.com/GoyDevv/Horizon-Android), pinned as a
-source submodule at `ae4c85dc5b31da2078ee1e1009a53ced7d7ed1ba`. The app identity,
-launcher icon, splash entry, dashboard and navigation remain RustCraft. The
-engine setup/game activity is branded RustCraft and uses the engine's native
-Rust/wgpu renderer and Android NativeActivity.
+source submodule at `ae4c85dc5b31da2078ee1e1009a53ced7d7ed1ba`. RustCraft's
+launcher has its own dark field-console visual identity, geometric R mark,
+navigation dock, screens, controls and transitions; it does not copy Horizon's
+launcher layouts, illustrations, typography or assets. The game engine remains
+an integrated NativeActivity using its Rust/wgpu renderer.
+
+Immersive sticky fullscreen is enabled in the RustCraft launcher and game
+activity. System bars can be temporarily revealed with an edge swipe and hide
+again automatically. The native engine's Android screen hook reapplies the
+same behavior when it changes display settings or regains focus.
 
 Minecraft 26.3 is the only engine game version. Horizon is a Rust reimplementation
 and does not execute the Java client or install a JVM/JRE on the Android device.
@@ -19,10 +25,11 @@ is not copied into the APK, and is not used to start the game.
 ## Features and current boundaries
 
 - RustCraft package: `com.rustcraft.launcher`; Android 10+; ARM64-v8a only.
-- Custom RustCraft-branded launcher UI, icon, system splash entry, settings,
-  navigation and credits. The Horizon engine UI is not copied into the Compose
-  app; its native setup/game screens are adapted at build time with RustCraft
-  branding.
+- Original RustCraft launcher UI, adaptive icon, system splash entry, settings,
+  navigation and credits. Native engine strings and mark are branded at build
+  time; the Compose app does not reuse Horizon launcher visual assets or layouts.
+- Immersive sticky hiding of Android status/navigation bars in the launcher and
+  native game activity, with transient swipe-to-reveal behavior.
 - Native Rust Horizon Android engine with Vulkan and GLES paths, engine-managed
   26.3 resource installation, touch controls, game settings, offline accounts,
   Ely.by authentication, resource packs and Horizon-native mods.
@@ -56,11 +63,13 @@ git -C engine/horizon-android rev-parse HEAD
 ```
 
 The expected source revision is
-`ae4c85dc5b31da2078ee1e1009a53ced7d7ed1ba`. Build-time branding edits are
-applied temporarily by `scripts/build_horizon_android.py` and reverted after
-the build. The engine's public packaging helper includes only allowlisted
-generated engine tables in the APK; downloaded Minecraft game inputs, host
-preparation files and signing keys are not staged as app assets.
+`ae4c85dc5b31da2078ee1e1009a53ced7d7ed1ba`. Build-time branding and immersive
+system-bar edits are applied temporarily by `scripts/build_horizon_android.py`;
+the required Java bridge is copied into Gradle's generated source directory and
+the submodule is restored after staging. The engine's public packaging helper
+includes only allowlisted generated engine tables in the APK; downloaded
+Minecraft game inputs, host preparation files and signing keys are not staged
+as app assets.
 
 The APK includes the Horizon license and complete third-party notice file in
 its assets. Keep those notices with redistributed builds. RustCraft's own

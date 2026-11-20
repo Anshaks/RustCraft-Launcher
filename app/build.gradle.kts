@@ -56,7 +56,7 @@ android {
     }
 
     sourceSets["main"].jniLibs.srcDirs(rustJniLibs, horizonJniLibs)
-    sourceSets["main"].java.srcDir(horizonRoot.resolve("packaging/android/java"))
+    sourceSets["main"].java.srcDir(horizonGenerated.map { it.dir("java") })
     sourceSets["main"].assets.srcDir(horizonAssets)
 
     packaging {

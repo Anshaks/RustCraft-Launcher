@@ -6,7 +6,6 @@ import android.os.Bundle
 import android.util.AtomicFile
 import android.widget.Toast
 import androidx.activity.ComponentActivity
-import dev.horizon.android.HorizonActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -15,9 +14,12 @@ import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,6 +30,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
@@ -65,7 +68,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.lightColorScheme
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -78,11 +81,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -92,32 +102,60 @@ import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 
-private val Ink = Color(0xFF20251F)
-private val Muted = Color(0xFF858A83)
-private val Canvas = Color(0xFFF5F6F3)
-private val Green = Color(0xFF537A5A)
-private val PaleGreen = Color(0xFFE7EEE5)
+private val Ink = Color(0xFFF4F0E7)
+private val Muted = Color(0xFF9AA1AF)
+private val Canvas = Color(0xFF101218)
+private val Green = Color(0xFFC9F36A)
+private val PaleGreen = Color(0xFF252A33)
+private val Panel = Color(0xFF191D25)
+private val PanelRaised = Color(0xFF222832)
+private val Coral = Color(0xFFFF805C)
+private val Hairline = Color(0xFF343B47)
+private val DeepInk = Color(0xFF101218)
 
-private data class GameVersion(val id: String, val type: String)
-private data class ManagedFile(val name: String, val bytes: Long)
-private data class PlayerProfile(val name: String, val provider: String)
+internal data class GameVersion(val id: String, val type: String)
+internal data class ManagedFile(val name: String, val bytes: Long)
+internal data class PlayerProfile(val name: String, val provider: String)
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        applyRustCraftImmersiveMode()
         val gameDir = getExternalFilesDir(null)?.resolve("games") ?: filesDir.resolve("games")
         setContent {
             MaterialTheme(
-                colorScheme = lightColorScheme(
+                colorScheme = darkColorScheme(
                     primary = Green,
-                    onPrimary = Color.White,
+                    onPrimary = DeepInk,
                     background = Canvas,
-                    surface = Color.White,
+                    surface = Panel,
                     onSurface = Ink,
-                    secondary = Green,
+                    secondary = Coral,
+                    onSecondary = DeepInk,
+                    surfaceVariant = PanelRaised,
+                    onSurfaceVariant = Muted,
                 )
             ) {
                 RustCraftApp(gameDir, ::notify)
             }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        applyRustCraftImmersiveMode()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) applyRustCraftImmersiveMode()
+    }
+
+    private fun applyRustCraftImmersiveMode() {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            hide(WindowInsetsCompat.Type.systemBars())
         }
     }
 
@@ -202,6 +240,9 @@ private fun RustCraftApp(gameDir: File, notify: (String) -> Unit) {
             return
         }
         config.put("name", name)
+        val screen = config.optJSONObject("screen") ?: JSONObject()
+        screen.put("immersive", true)
+        config.put("screen", screen)
         val stream = try {
             configFile.startWrite()
         } catch (error: IOException) {
@@ -216,7 +257,9 @@ private fun RustCraftApp(gameDir: File, notify: (String) -> Unit) {
             notify("Could not save the selected player: ${error.message}")
             return
         }
-        context.startActivity(Intent(context, HorizonActivity::class.java))
+        context.startActivity(
+            Intent().setClassName(context, "dev.horizon.android.HorizonActivity")
+        )
     }
 
     fun chooseAccountProvider(provider: String) {
@@ -284,51 +327,85 @@ private fun RustCraftApp(gameDir: File, notify: (String) -> Unit) {
     Surface(modifier = Modifier.fillMaxSize(), color = Canvas) {
         Column(Modifier.fillMaxSize()) {
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Color.White)
+                modifier = Modifier.fillMaxWidth()
                     .windowInsetsPadding(WindowInsets.statusBars)
-                    .padding(horizontal = 22.dp, vertical = 17.dp),
+                    .padding(horizontal = 20.dp, vertical = 15.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    BrandMark()
-                    Spacer(Modifier.width(10.dp))
+                    RustCraftBrandMark()
+                    Spacer(Modifier.width(12.dp))
                     Column {
-                        Text("rustcraft", fontWeight = FontWeight.Bold, fontSize = 19.sp, color = Ink)
-                        Text("JAVA EDITION • ANDROID", fontSize = 9.sp, color = Muted, letterSpacing = 1.2.sp)
+                        Text(
+                            "RUSTCRAFT",
+                            fontWeight = FontWeight.Black,
+                            fontSize = 17.sp,
+                            color = Ink,
+                            letterSpacing = 1.1.sp,
+                        )
+                        Text(
+                            "JAVA FIELD SYSTEM  /  26.3",
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 9.sp,
+                            color = Muted,
+                            letterSpacing = 0.3.sp,
+                        )
                     }
                 }
-                if (busy) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                else Text("READY", color = Green, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.3.sp)
+                Row(
+                    modifier = Modifier.clip(RoundedCornerShape(50))
+                        .background(Panel)
+                        .padding(horizontal = 11.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(7.dp),
+                ) {
+                    if (busy) {
+                        CircularProgressIndicator(
+                            Modifier.size(9.dp),
+                            strokeWidth = 2.dp,
+                            color = Coral,
+                        )
+                    } else {
+                        Box(Modifier.size(7.dp).clip(CircleShape).background(Green))
+                    }
+                    Text(
+                        if (busy) "WORKING" else "ARM64",
+                        color = if (busy) Coral else Green,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.5.sp,
+                    )
+                }
             }
 
             AnimatedContent(
                 targetState = page,
                 transitionSpec = {
                     if (reduceMotion) EnterTransition.None togetherWith ExitTransition.None
-                    else fadeIn(tween(160)) togetherWith fadeOut(tween(120))
+                    else (fadeIn(tween(190)) + slideInHorizontally(tween(190)) { it / 12 }) togetherWith
+                        (fadeOut(tween(120)) + slideOutHorizontally(tween(120)) { -it / 16 })
                 },
                 label = "page-transition",
                 modifier = Modifier.weight(1f),
             ) { target ->
                 when (target) {
-                    "Versions" -> VersionsPage(
+                    "Versions" -> BuildLibraryPage(
                         versions = versions,
                         latest = latest,
                         selectedVersion = selectedVersion,
                         onSelect = { selectedVersion = it },
                         onInstall = ::openEngine,
                     )
-                    "Library" -> LibraryPage(
+                    "Library" -> ContentLibraryPage(
                         category = category,
                         files = files,
                         onCategory = { category = it; refreshFiles() },
                         onImport = { importFile.launch(arrayOf("*/*")) },
                         onRemove = { pendingDelete = it },
                     )
-                    "Settings" -> SettingsPage(
+                    "Settings" -> LauncherSettingsPage(
                         reduceMotion = reduceMotion,
                         onReduceMotion = { reduceMotion = it },
                         onSave = {
@@ -338,7 +415,7 @@ private fun RustCraftApp(gameDir: File, notify: (String) -> Unit) {
                             }
                         },
                     )
-                    else -> HomePage(
+                    else -> RustCraftHomePage(
                         latest = latest,
                         selectedProfile = selectedProfile,
                         selectedVersion = selectedVersion,
@@ -349,25 +426,34 @@ private fun RustCraftApp(gameDir: File, notify: (String) -> Unit) {
                 }
             }
 
-            NavigationBar(
-                containerColor = Color.White,
+            Surface(
+                modifier = Modifier.fillMaxWidth()
+                    .padding(horizontal = 14.dp)
+                    .windowInsetsPadding(WindowInsets.navigationBars)
+                    .padding(bottom = 8.dp),
+                shape = RoundedCornerShape(21.dp),
+                color = Panel,
+                border = BorderStroke(1.dp, Hairline),
             ) {
-                listOf(
-                    Triple("Home", Icons.Rounded.Home, "Home"),
-                    Triple("Versions", Icons.AutoMirrored.Rounded.List, "Versions"),
-                    Triple("Library", Icons.Rounded.Build, "Library"),
-                    Triple("Settings", Icons.Rounded.Settings, "Settings"),
-                ).forEach { (label, icon, route) ->
-                    NavigationBarItem(
-                        selected = page == route,
-                        onClick = {
-                            page = route
-                            if (route == "Library") refreshFiles()
-                            if (route == "Home") refreshProfiles()
-                        },
-                        icon = { Icon(icon, contentDescription = label, modifier = Modifier.size(21.dp)) },
-                        label = { Text(label, fontSize = 10.sp) },
-                    )
+                Row(Modifier.padding(5.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    listOf(
+                        Triple("Home", Icons.Rounded.Home, "Home"),
+                        Triple("Builds", Icons.AutoMirrored.Rounded.List, "Versions"),
+                        Triple("Files", Icons.Rounded.Build, "Library"),
+                        Triple("Tuning", Icons.Rounded.Settings, "Settings"),
+                    ).forEach { (label, icon, route) ->
+                        LauncherDockItem(
+                            label = label,
+                            icon = icon,
+                            selected = page == route,
+                            onClick = {
+                                page = route
+                                if (route == "Library") refreshFiles()
+                                if (route == "Home") refreshProfiles()
+                            },
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
                 }
             }
         }
@@ -823,7 +909,7 @@ private fun uniqueDestination(directory: File, requestedName: String): File {
     return candidate
 }
 
-private fun formatBytes(bytes: Long): String = when {
+internal fun formatBytes(bytes: Long): String = when {
     bytes < 1024 -> "$bytes B"
     bytes < 1024 * 1024 -> "${bytes / 1024} KB"
     else -> "${bytes / (1024 * 1024)} MB"
