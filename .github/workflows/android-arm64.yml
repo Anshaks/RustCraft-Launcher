@@ -1,0 +1,84 @@
+name: Android ARM64
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK and ARM64 NDK
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "ndk;28.2.13676358"
+
+      - name: Install Rust toolchains and Android target
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal \
+            --component clippy,rustfmt --target aarch64-linux-android
+          rustup target add aarch64-linux-android
+          cargo +1.95.0 install cargo-ndk --locked
+        env:
+          CARGO_BUILD_JOBS: 2
+
+      - name: Test launcher Rust core
+        run: cargo test --manifest-path rust/Cargo.toml
+
+      - name: Test Horizon Android integration
+        run: python3 -m unittest discover -s engine/horizon-android/tests -p 'test_android*.py'
+
+      - name: Build ARM64 release APK
+        env:
+          CARGO_BUILD_JOBS: 2
+        run: ./gradlew --no-daemon --max-workers=2 :app:assembleRelease
+
+      - name: Verify APK architecture, identity and signature
+        run: |
+          set -euo pipefail
+          apk=app/build/outputs/apk/release/app-release.apk
+          test -s "$apk"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose "$apk"
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" \
+            | grep -F "package: name='com.rustcraft.launcher'"
+          unzip -Z1 "$apk" | grep -Fx 'lib/arm64-v8a/libhorizon_android.so'
+          while IFS= read -r entry; do
+            case "$entry" in
+              lib/arm64-v8a/*) ;;
+              *) echo "Unexpected native ABI in APK: $entry" >&2; exit 1 ;;
+            esac
+          done < <(unzip -Z1 "$apk" | grep -E '^lib/[^/]+/[^/]+\.so$' || true)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RustCraft-Launcher-ARM64
+          path: app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 14

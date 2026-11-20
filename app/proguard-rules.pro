@@ -1,1 +1,2 @@
 -keep class com.rustcraft.launcher.NativeBridge { *; }
+-keep class dev.horizon.android.** { *; }

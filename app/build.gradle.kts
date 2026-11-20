@@ -6,18 +6,25 @@ plugins {
 
 val rustRoot = layout.projectDirectory.dir("../rust").asFile
 val rustJniLibs = rustRoot.resolve("jniLibs")
+val horizonRoot = rootProject.layout.projectDirectory.dir("engine/horizon-android").asFile
+val horizonGenerated = layout.buildDirectory.dir("generated/horizonAndroid")
+val horizonJniLibs = horizonGenerated.map { it.dir("jniLibs") }
+val horizonAssets = horizonGenerated.map { it.dir("assets") }
 
 android {
     namespace = "com.rustcraft.launcher"
     compileSdk = 35
-    ndkVersion = "27.2.12479018"
+    ndkVersion = "28.2.13676358"
 
     defaultConfig {
         applicationId = "com.rustcraft.launcher"
         minSdk = 29
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.0.2"
+        versionCode = 4
+        versionName = "1.1.0"
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     compileOptions {
@@ -48,7 +55,9 @@ android {
         }
     }
 
-    sourceSets["main"].jniLibs.srcDir(rustJniLibs)
+    sourceSets["main"].jniLibs.srcDirs(rustJniLibs, horizonJniLibs)
+    sourceSets["main"].java.srcDir(horizonRoot.resolve("packaging/android/java"))
+    sourceSets["main"].assets.srcDir(horizonAssets)
 
     packaging {
         jniLibs.useLegacyPackaging = true
@@ -57,14 +66,11 @@ android {
 
 val buildRustAndroid = tasks.register<Exec>("buildRustAndroid") {
     group = "build"
-    description = "Compile the Rust JNI core for supported Android ABIs."
+    description = "Compile the Rust launcher core for ARM64 Android."
     workingDir = rustRoot
     commandLine(
         "cargo", "ndk",
         "-t", "arm64-v8a",
-        "-t", "armeabi-v7a",
-        "-t", "x86_64",
-        "-t", "x86",
         "-o", rustJniLibs.absolutePath,
         "build", "--release",
     )
@@ -72,8 +78,24 @@ val buildRustAndroid = tasks.register<Exec>("buildRustAndroid") {
     outputs.dir(rustJniLibs)
 }
 
+val buildHorizonAndroid = tasks.register<Exec>("buildHorizonAndroid") {
+    group = "build"
+    description = "Build and stage the licensed Horizon Android ARM64 engine."
+    workingDir = rootProject.projectDir
+    commandLine(
+        "python3",
+        rootProject.file("scripts/build_horizon_android.py").absolutePath,
+        "--engine",
+        horizonRoot.absolutePath,
+        "--output",
+        horizonGenerated.get().asFile.absolutePath,
+    )
+    outputs.dir(horizonGenerated)
+    outputs.upToDateWhen { false }
+}
+
 tasks.named("preBuild").configure {
-    dependsOn(buildRustAndroid)
+    dependsOn(buildRustAndroid, buildHorizonAndroid)
 }
 
 dependencies {

@@ -1,0 +1,4 @@
+[submodule "engine/horizon-android"]
+	path = engine/horizon-android
+	url = https://github.com/GoyDevv/Horizon-Android.git
+	branch = android
