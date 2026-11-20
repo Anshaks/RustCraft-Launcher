@@ -4,6 +4,7 @@ use sha1::{Digest, Sha1};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 const MANIFEST_URL: &str = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 const DOWNLOAD_HOSTS: &[&str] = &["piston-meta.mojang.com", "piston-data.mojang.com"];
@@ -22,6 +23,8 @@ struct Request {
     #[serde(default)]
     profile: Option<String>,
     #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
     settings: Option<Settings>,
 }
 
@@ -29,6 +32,25 @@ struct Request {
 struct Settings {
     ram_mb: Option<u32>,
     java_path: Option<String>,
+    reduce_motion: Option<bool>,
+    selected_profile: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+struct Profile {
+    name: String,
+    provider: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct InstallProgress {
+    version: String,
+    status: String,
+    message: String,
+    percent: u8,
+    downloaded_bytes: u64,
+    total_bytes: u64,
+    bytes_per_second: u64,
 }
 
 fn success(data: Value) -> Value {
@@ -47,6 +69,51 @@ fn required_root(req: &Request) -> Result<&Path, String> {
 
 fn ensure_root(root: &Path) -> Result<(), String> {
     fs::create_dir_all(root).map_err(|e| format!("Cannot create launcher directory: {e}"))
+}
+
+fn progress_path(root: &Path) -> PathBuf {
+    root.join("install-progress.json")
+}
+
+fn write_progress(root: &Path, progress: &InstallProgress) -> Result<(), String> {
+    let path = progress_path(root);
+    let temporary = root.join("install-progress.tmp");
+    let bytes = serde_json::to_vec(progress).map_err(|e| format!("Cannot encode progress: {e}"))?;
+    fs::write(&temporary, bytes).map_err(|e| format!("Cannot save install progress: {e}"))?;
+    fs::rename(&temporary, path).map_err(|e| format!("Cannot update install progress: {e}"))
+}
+
+fn read_progress(root: &Path) -> Result<Value, String> {
+    let path = progress_path(root);
+    if !path.exists() {
+        return Ok(json!(InstallProgress::default()));
+    }
+    let bytes = fs::read(path).map_err(|e| format!("Cannot read install progress: {e}"))?;
+    serde_json::from_slice(&bytes).map_err(|e| format!("Invalid install progress: {e}"))
+}
+
+fn set_progress(
+    root: &Path,
+    version: &str,
+    status: &str,
+    message: &str,
+    percent: u8,
+    downloaded_bytes: u64,
+    total_bytes: u64,
+    bytes_per_second: u64,
+) -> Result<(), String> {
+    write_progress(
+        root,
+        &InstallProgress {
+            version: version.to_string(),
+            status: status.to_string(),
+            message: message.to_string(),
+            percent,
+            downloaded_bytes,
+            total_bytes,
+            bytes_per_second,
+        },
+    )
 }
 
 fn get_json(url: &str) -> Result<Value, String> {
@@ -86,12 +153,19 @@ fn version_manifest() -> Result<Value, String> {
 fn valid_version_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 100
-        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
         && id != "."
         && id != ".."
 }
 
-fn download_file(url: &str, path: &Path, expected_sha1: &str) -> Result<(), String> {
+fn download_file(
+    url: &str,
+    path: &Path,
+    expected_sha1: &str,
+    progress: Option<(&Path, &str, &str, u64, u64, u8, u8)>,
+) -> Result<u64, String> {
     let host = url
         .split_once("://")
         .and_then(|(_, rest)| rest.split('/').next())
@@ -110,11 +184,27 @@ fn download_file(url: &str, path: &Path, expected_sha1: &str) -> Result<(), Stri
             .set("User-Agent", "RustCraftLauncher/0.1")
             .call()
             .map_err(|e| format!("Download failed: {e}"))?;
+        let expected_size = response
+            .header("Content-Length")
+            .and_then(|length| length.parse::<u64>().ok())
+            .unwrap_or(0);
+        let (base_bytes, requested_total) = progress
+            .as_ref()
+            .map(|(_, _, _, base, total, _, _)| (*base, *total))
+            .unwrap_or((0, expected_size));
+        let total_bytes = if requested_total == 0 {
+            base_bytes.saturating_add(expected_size)
+        } else {
+            requested_total
+        };
         let mut reader = response.into_reader();
-        let mut output = File::create(&temporary)
-            .map_err(|e| format!("Cannot create temporary file: {e}"))?;
+        let mut output =
+            File::create(&temporary).map_err(|e| format!("Cannot create temporary file: {e}"))?;
         let mut hasher = Sha1::new();
         let mut buffer = [0_u8; 64 * 1024];
+        let start = Instant::now();
+        let mut last_update = start;
+        let mut downloaded = 0_u64;
         loop {
             let count = reader
                 .read(&mut buffer)
@@ -122,20 +212,63 @@ fn download_file(url: &str, path: &Path, expected_sha1: &str) -> Result<(), Stri
             if count == 0 {
                 break;
             }
+            downloaded = downloaded.saturating_add(count as u64);
             hasher.update(&buffer[..count]);
             output
                 .write_all(&buffer[..count])
                 .map_err(|e| format!("Cannot write downloaded file: {e}"))?;
+            if let Some((root, version, message, base, _, start_percent, end_percent)) =
+                progress.as_ref()
+            {
+                let now = Instant::now();
+                if now.duration_since(last_update) >= Duration::from_millis(250)
+                    || (expected_size > 0 && downloaded >= expected_size)
+                {
+                    let fraction = if expected_size == 0 {
+                        0.0
+                    } else {
+                        (downloaded as f64 / expected_size as f64).clamp(0.0, 1.0)
+                    };
+                    let percent =
+                        *start_percent as f64 + (*end_percent - *start_percent) as f64 * fraction;
+                    let elapsed = now.duration_since(start).as_secs_f64().max(0.001);
+                    set_progress(
+                        root,
+                        version,
+                        "downloading",
+                        message,
+                        percent.round() as u8,
+                        base.saturating_add(downloaded),
+                        total_bytes,
+                        (downloaded as f64 / elapsed) as u64,
+                    )?;
+                    last_update = now;
+                }
+            }
         }
         output
             .flush()
             .map_err(|e| format!("Cannot flush downloaded file: {e}"))?;
         let actual = format!("{:x}", hasher.finalize());
         if !actual.eq_ignore_ascii_case(expected_sha1) {
-            return Err(format!("SHA-1 mismatch (expected {expected_sha1}, got {actual})"));
+            return Err(format!(
+                "SHA-1 mismatch (expected {expected_sha1}, got {actual})"
+            ));
+        }
+        if let Some((root, version, message, base, total, _, end_percent)) = progress.as_ref() {
+            set_progress(
+                root,
+                version,
+                "verifying",
+                message,
+                *end_percent,
+                base.saturating_add(downloaded),
+                if *total == 0 { downloaded } else { *total },
+                0,
+            )?;
         }
         fs::rename(&temporary, path).map_err(|e| format!("Cannot finalize download: {e}"))?;
-        Ok(())
+        Ok(downloaded)
     })();
     if result.is_err() {
         let _ = fs::remove_file(temporary);
@@ -147,6 +280,16 @@ fn install_version(root: &Path, id: &str) -> Result<Value, String> {
     if !valid_version_id(id) {
         return Err("Invalid Minecraft version identifier".to_string());
     }
+    set_progress(
+        root,
+        id,
+        "preparing",
+        "Reading Mojang version manifest",
+        0,
+        0,
+        0,
+        0,
+    )?;
     let manifest = get_json(MANIFEST_URL)?;
     let version = manifest["versions"]
         .as_array()
@@ -161,7 +304,22 @@ fn install_version(root: &Path, id: &str) -> Result<Value, String> {
 
     let version_dir = root.join("versions").join(id);
     let metadata_path = version_dir.join(format!("{id}.json"));
-    download_file(metadata_url, &metadata_path, metadata_hash)?;
+    set_progress(
+        root,
+        id,
+        "downloading",
+        "Downloading version metadata",
+        0,
+        0,
+        0,
+        0,
+    )?;
+    let metadata_bytes = download_file(
+        metadata_url,
+        &metadata_path,
+        metadata_hash,
+        Some((root, id, "Downloading version metadata", 0, 0, 0, 5)),
+    )?;
 
     let metadata: Value = serde_json::from_slice(
         &fs::read(&metadata_path).map_err(|e| format!("Cannot read version metadata: {e}"))?,
@@ -176,8 +334,33 @@ fn install_version(root: &Path, id: &str) -> Result<Value, String> {
     let client_hash = client["sha1"]
         .as_str()
         .ok_or_else(|| "Client checksum is missing".to_string())?;
+    let client_size = client["size"].as_u64().unwrap_or(0);
+    let total_bytes = metadata_bytes.saturating_add(client_size);
     let client_path = version_dir.join(format!("{id}.jar"));
-    download_file(client_url, &client_path, client_hash)?;
+    let _client_bytes = download_file(
+        client_url,
+        &client_path,
+        client_hash,
+        Some((
+            root,
+            id,
+            "Downloading vanilla client",
+            metadata_bytes,
+            total_bytes,
+            5,
+            99,
+        )),
+    )?;
+    set_progress(
+        root,
+        id,
+        "complete",
+        "Client files verified. Game runtime is not installed.",
+        100,
+        total_bytes,
+        total_bytes,
+        0,
+    )?;
 
     Ok(json!({
         "id": id,
@@ -254,10 +437,8 @@ fn list_files(root: &Path, category: &str) -> Result<Value, String> {
 fn update_settings(root: &Path, settings: &Settings) -> Result<Value, String> {
     let path = root.join("settings.json");
     let mut current: Settings = if path.exists() {
-        serde_json::from_slice(
-            &fs::read(&path).map_err(|e| format!("Cannot read settings: {e}"))?,
-        )
-        .map_err(|e| format!("Invalid saved settings: {e}"))?
+        serde_json::from_slice(&fs::read(&path).map_err(|e| format!("Cannot read settings: {e}"))?)
+            .map_err(|e| format!("Invalid saved settings: {e}"))?
     } else {
         Settings::default()
     };
@@ -273,8 +454,17 @@ fn update_settings(root: &Path, settings: &Settings) -> Result<Value, String> {
         }
         current.java_path = Some(java.clone());
     }
-    fs::write(&path, serde_json::to_vec_pretty(&current).map_err(|e| e.to_string())?)
-        .map_err(|e| format!("Cannot save settings: {e}"))?;
+    if let Some(reduce_motion) = settings.reduce_motion {
+        current.reduce_motion = Some(reduce_motion);
+    }
+    if let Some(selected_profile) = &settings.selected_profile {
+        current.selected_profile = Some(selected_profile.clone());
+    }
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&current).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("Cannot save settings: {e}"))?;
     serde_json::to_value(current).map_err(|e| e.to_string())
 }
 
@@ -282,17 +472,54 @@ fn profile_path(root: &Path) -> PathBuf {
     root.join("profiles.json")
 }
 
+fn load_profiles(root: &Path) -> Result<Vec<Profile>, String> {
+    let path = profile_path(root);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let bytes = fs::read(path).map_err(|e| format!("Cannot read profiles: {e}"))?;
+    let value: Value =
+        serde_json::from_slice(&bytes).map_err(|e| format!("Invalid saved profiles: {e}"))?;
+    let values = value
+        .as_array()
+        .ok_or_else(|| "Saved profiles must be a list".to_string())?;
+    values
+        .iter()
+        .map(|profile| {
+            if let Some(name) = profile.as_str() {
+                Ok(Profile {
+                    name: name.to_string(),
+                    provider: "offline".to_string(),
+                })
+            } else {
+                serde_json::from_value(profile.clone())
+                    .map_err(|e| format!("Invalid saved profile: {e}"))
+            }
+        })
+        .collect()
+}
+
+fn save_profiles(root: &Path, profiles: &[Profile]) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(profiles).map_err(|e| e.to_string())?;
+    fs::write(profile_path(root), bytes).map_err(|e| format!("Cannot save profiles: {e}"))
+}
+
 fn handle(req: Request) -> Result<Value, String> {
     match req.action.as_str() {
         "versions" => version_manifest(),
         "install" => install_version(
             required_root(&req)?,
-            req.id.as_deref().ok_or_else(|| "Missing version ID".to_string())?,
+            req.id
+                .as_deref()
+                .ok_or_else(|| "Missing version ID".to_string())?,
         ),
+        "install_status" => read_progress(required_root(&req)?),
         "installed_versions" => installed_versions(required_root(&req)?),
         "list_files" => list_files(
             required_root(&req)?,
-            req.category.as_deref().ok_or_else(|| "Missing category".to_string())?,
+            req.category
+                .as_deref()
+                .ok_or_else(|| "Missing category".to_string())?,
         ),
         "add_profile" => {
             let root = required_root(&req)?;
@@ -300,34 +527,52 @@ fn handle(req: Request) -> Result<Value, String> {
             if !(3..=16).contains(&name.len())
                 || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
             {
-                return Err("Offline player names must be 3–16 letters, numbers, or underscores".to_string());
+                return Err(
+                    "Offline player names must be 3–16 letters, numbers, or underscores"
+                        .to_string(),
+                );
             }
-            let path = profile_path(root);
-            let mut profiles: Vec<String> = if path.exists() {
-                serde_json::from_slice(
-                    &fs::read(&path).map_err(|e| format!("Cannot read profiles: {e}"))?,
-                )
-                .map_err(|e| format!("Invalid saved profiles: {e}"))?
-            } else {
-                Vec::new()
-            };
-            if !profiles.iter().any(|existing| existing.eq_ignore_ascii_case(name)) {
-                profiles.push(name.to_string());
+            let provider = req.provider.as_deref().unwrap_or("offline");
+            if provider != "offline" {
+                return Err(format!(
+                    "{} sign-in is not configured in this build; use an offline profile",
+                    provider
+                ));
             }
-            fs::write(&path, serde_json::to_vec_pretty(&profiles).map_err(|e| e.to_string())?)
-                .map_err(|e| format!("Cannot save profiles: {e}"))?;
+            let mut profiles = load_profiles(root)?;
+            if profiles.len() >= 3 {
+                return Err("You can create up to three profiles".to_string());
+            }
+            if profiles
+                .iter()
+                .any(|existing| existing.name.eq_ignore_ascii_case(name))
+            {
+                return Err("A profile with this name already exists".to_string());
+            }
+            profiles.push(Profile {
+                name: name.to_string(),
+                provider: provider.to_string(),
+            });
+            save_profiles(root, &profiles)?;
             Ok(json!(profiles))
         }
         "profiles" => {
-            let path = profile_path(required_root(&req)?);
-            let profiles: Vec<String> = if path.exists() {
-                serde_json::from_slice(
-                    &fs::read(path).map_err(|e| format!("Cannot read profiles: {e}"))?,
-                )
-                .map_err(|e| format!("Invalid saved profiles: {e}"))?
-            } else {
-                Vec::new()
-            };
+            let profiles = load_profiles(required_root(&req)?)?;
+            Ok(json!(profiles))
+        }
+        "remove_profile" => {
+            let root = required_root(&req)?;
+            let name = req
+                .profile
+                .as_deref()
+                .ok_or_else(|| "Missing profile name".to_string())?;
+            let mut profiles = load_profiles(root)?;
+            let original_len = profiles.len();
+            profiles.retain(|profile| profile.name != name);
+            if profiles.len() == original_len {
+                return Err("Profile was not found".to_string());
+            }
+            save_profiles(root, &profiles)?;
             Ok(json!(profiles))
         }
         "settings" => {
@@ -339,8 +584,14 @@ fn handle(req: Request) -> Result<Value, String> {
         }
         "remove_file" => {
             let root = required_root(&req)?;
-            let category = req.category.as_deref().ok_or_else(|| "Missing category".to_string())?;
-            let name = req.name.as_deref().ok_or_else(|| "Missing file name".to_string())?;
+            let category = req
+                .category
+                .as_deref()
+                .ok_or_else(|| "Missing category".to_string())?;
+            let name = req
+                .name
+                .as_deref()
+                .ok_or_else(|| "Missing file name".to_string())?;
             if name.is_empty()
                 || name == "."
                 || name == ".."
@@ -362,6 +613,8 @@ fn dispatch(input: &str) -> String {
     let result = match parsed {
         Ok(req) => {
             let root = req.root.clone();
+            let installing = req.action == "install";
+            let version = req.id.clone().unwrap_or_default();
             if let Some(path) = root.as_deref() {
                 if let Err(error) = ensure_root(path) {
                     return failure(error).to_string();
@@ -369,7 +622,14 @@ fn dispatch(input: &str) -> String {
             }
             match handle(req) {
                 Ok(data) => success(data),
-                Err(error) => failure(error),
+                Err(error) => {
+                    if installing {
+                        if let Some(path) = root.as_deref() {
+                            let _ = set_progress(path, &version, "failed", &error, 0, 0, 0, 0);
+                        }
+                    }
+                    failure(error)
+                }
             }
         }
         Err(error) => failure(format!("Invalid request: {error}")),
@@ -397,6 +657,70 @@ mod tests {
     }
 
     #[test]
+    fn profiles_migrate_and_enforce_three_profile_limit() {
+        let root = std::env::temp_dir().join(format!("rustcraft-profiles-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        ensure_root(&root).unwrap();
+        fs::write(profile_path(&root), br#"["Alex"]"#).unwrap();
+        let mut profiles = load_profiles(&root).unwrap();
+        assert_eq!(profiles[0].provider, "offline");
+        profiles.push(Profile {
+            name: "Sam".into(),
+            provider: "offline".into(),
+        });
+        profiles.push(Profile {
+            name: "Casey".into(),
+            provider: "offline".into(),
+        });
+        save_profiles(&root, &profiles).unwrap();
+        assert_eq!(load_profiles(&root).unwrap().len(), 3);
+        let response: Value = serde_json::from_str(&dispatch(
+            &json!({"action":"add_profile","root":root,"profile":"Taylor"}).to_string(),
+        ))
+        .unwrap();
+        assert_eq!(response["ok"], false);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn non_offline_accounts_are_never_saved_as_authenticated() {
+        let root = std::env::temp_dir().join(format!("rustcraft-auth-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let response: Value = serde_json::from_str(&dispatch(
+            &json!({"action":"add_profile","root":root,"profile":"Alex","provider":"microsoft"})
+                .to_string(),
+        ))
+        .unwrap();
+        assert_eq!(response["ok"], false);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn install_progress_is_readable_while_downloads_run() {
+        let root = std::env::temp_dir().join(format!("rustcraft-progress-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        ensure_root(&root).unwrap();
+        set_progress(
+            &root,
+            "26.3",
+            "downloading",
+            "Downloading vanilla client",
+            42,
+            4_200,
+            10_000,
+            1_024,
+        )
+        .unwrap();
+        let progress = read_progress(&root).unwrap();
+        assert_eq!(progress["version"], "26.3");
+        assert_eq!(progress["status"], "downloading");
+        assert_eq!(progress["percent"], 42);
+        assert_eq!(progress["downloaded_bytes"], 4_200);
+        assert_eq!(progress["bytes_per_second"], 1_024);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn download_hashing_uses_sha1() {
         let digest = format!("{:x}", Sha1::digest(b"abc"));
         assert_eq!(digest, "a9993e364706816aba3e25717850c26c9cd0d89d");
@@ -411,8 +735,11 @@ pub extern "system" fn Java_com_rustcraft_launcher_NativeBridge_execute<'local>(
 ) -> jni::sys::jstring {
     let input: String = match env.get_string(&request) {
         Ok(value) => value.into(),
-        Err(error) => return env.new_string(failure(format!("JNI input error: {error}")).to_string())
-            .map_or(std::ptr::null_mut(), |s| s.into_raw()),
+        Err(error) => {
+            return env
+                .new_string(failure(format!("JNI input error: {error}")).to_string())
+                .map_or(std::ptr::null_mut(), |s| s.into_raw())
+        }
     };
     env.new_string(dispatch(&input))
         .map_or(std::ptr::null_mut(), |s| s.into_raw())

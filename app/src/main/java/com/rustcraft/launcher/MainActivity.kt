@@ -8,9 +8,16 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -54,6 +61,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
@@ -75,6 +83,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -89,6 +99,16 @@ private val PaleGreen = Color(0xFFE7EEE5)
 
 private data class GameVersion(val id: String, val type: String)
 private data class ManagedFile(val name: String, val bytes: Long)
+private data class PlayerProfile(val name: String, val provider: String)
+private data class InstallProgress(
+    val version: String = "",
+    val status: String = "",
+    val message: String = "",
+    val percent: Int = 0,
+    val downloadedBytes: Long = 0,
+    val totalBytes: Long = 0,
+    val bytesPerSecond: Long = 0,
+)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -124,26 +144,34 @@ private fun RustCraftApp(gameDir: File, notify: (String) -> Unit) {
     var profileDialog by remember { mutableStateOf(false) }
     var profileName by remember { mutableStateOf("") }
     var selectedProfile by remember { mutableStateOf("") }
+    var accountProvider by remember { mutableStateOf("offline") }
+    var reduceMotion by remember { mutableStateOf(false) }
     var pendingDelete by remember { mutableStateOf<String?>(null) }
+    var pendingProfileDelete by remember { mutableStateOf<String?>(null) }
     var versions by remember { mutableStateOf<List<GameVersion>>(emptyList()) }
     val installedVersions = remember { mutableStateListOf<String>() }
     var latest by remember { mutableStateOf("Loading versions…") }
     var selectedVersion by remember { mutableStateOf("") }
     var category by remember { mutableStateOf("mods") }
     val files = remember { mutableStateListOf<ManagedFile>() }
-    val profiles = remember { mutableStateListOf<String>() }
+    val profiles = remember { mutableStateListOf<PlayerProfile>() }
     var ram by remember { mutableFloatStateOf(2048f) }
     var versionQuery by remember { mutableStateOf("") }
+    var installing by remember { mutableStateOf(false) }
+    var showInstallProgress by remember { mutableStateOf(false) }
+    var installProgress by remember { mutableStateOf(InstallProgress()) }
+
+    suspend fun execute(request: JSONObject): JSONObject = withContext(Dispatchers.IO) {
+        val json = JSONObject(request.toString())
+        json.put("root", gameDir.absolutePath)
+        JSONObject(NativeBridge.execute(json.toString()))
+    }
 
     fun invoke(request: JSONObject, onResult: (Any) -> Unit = {}) {
         scope.launch {
             busy = true
             try {
-                val response = withContext(Dispatchers.IO) {
-                    val json = JSONObject(request.toString())
-                    json.put("root", gameDir.absolutePath)
-                    JSONObject(NativeBridge.execute(json.toString()))
-                }
+                val response = execute(request)
                 if (!response.optBoolean("ok")) {
                     notify(response.optString("error", "Launcher operation failed"))
                 } else {
@@ -162,9 +190,78 @@ private fun RustCraftApp(gameDir: File, notify: (String) -> Unit) {
             profiles.clear()
             val array = result as? JSONArray
             if (array != null) {
-                for (index in 0 until array.length()) profiles.add(array.getString(index))
+                for (index in 0 until array.length()) {
+                    val item = array.get(index)
+                    if (item is JSONObject) {
+                        profiles.add(PlayerProfile(item.optString("name"), item.optString("provider", "offline")))
+                    } else {
+                        profiles.add(PlayerProfile(item.toString(), "offline"))
+                    }
+                }
             }
-            if (selectedProfile !in profiles) selectedProfile = profiles.firstOrNull().orEmpty()
+            val savedSelection = selectedProfile
+            if (profiles.none { it.name == savedSelection }) selectedProfile = profiles.firstOrNull()?.name.orEmpty()
+        }
+    }
+
+    fun refreshInstalledVersions() {
+        invoke(JSONObject().put("action", "installed_versions")) { result ->
+            installedVersions.clear()
+            val array = result as? JSONArray
+            if (array != null) {
+                for (index in 0 until array.length()) installedVersions.add(array.getString(index))
+            }
+        }
+    }
+
+    suspend fun updateInstallProgress(version: String) {
+        val status = execute(JSONObject().put("action", "install_status"))
+        if (!status.optBoolean("ok")) return
+        val data = status.optJSONObject("data") ?: JSONObject()
+        installProgress = InstallProgress(
+            version = data.optString("version", version),
+            status = data.optString("status"),
+            message = data.optString("message"),
+            percent = data.optInt("percent").coerceIn(0, 100),
+            downloadedBytes = data.optLong("downloaded_bytes"),
+            totalBytes = data.optLong("total_bytes"),
+            bytesPerSecond = data.optLong("bytes_per_second"),
+        )
+    }
+
+    fun startInstall(version: String) {
+        if (installing) return
+        installing = true
+        busy = true
+        showInstallProgress = true
+        installProgress = InstallProgress(version = version, status = "preparing", message = "Preparing download")
+        scope.launch {
+            val installJob = scope.async(Dispatchers.IO) {
+                val request = JSONObject().put("action", "install").put("id", version)
+                val json = JSONObject(request.toString()).put("root", gameDir.absolutePath)
+                JSONObject(NativeBridge.execute(json.toString()))
+            }
+            try {
+                while (installJob.isActive) {
+                    delay(300)
+                    updateInstallProgress(version)
+                }
+                val response = installJob.await()
+                updateInstallProgress(version)
+                if (!response.optBoolean("ok")) {
+                    val message = response.optString("error", "Installation failed")
+                    installProgress = installProgress.copy(status = "failed", message = message)
+                    notify(message)
+                } else {
+                    refreshInstalledVersions()
+                }
+            } catch (error: Exception) {
+                installProgress = installProgress.copy(status = "failed", message = error.message ?: "Installation failed")
+                notify(error.message ?: "Installation failed")
+            } finally {
+                installing = false
+                busy = false
+            }
         }
     }
 
@@ -177,16 +274,6 @@ private fun RustCraftApp(gameDir: File, notify: (String) -> Unit) {
                     val item = array.getJSONObject(index)
                     files.add(ManagedFile(item.getString("name"), item.optLong("bytes")))
                 }
-            }
-        }
-    }
-
-    fun refreshInstalledVersions() {
-        invoke(JSONObject().put("action", "installed_versions")) { result ->
-            installedVersions.clear()
-            val array = result as? JSONArray
-            if (array != null) {
-                for (index in 0 until array.length()) installedVersions.add(array.getString(index))
             }
         }
     }
@@ -233,7 +320,17 @@ private fun RustCraftApp(gameDir: File, notify: (String) -> Unit) {
         invoke(JSONObject().put("action", "settings")) { result ->
             val settings = result as? JSONObject
             ram = settings?.optInt("ram_mb", 2048)?.toFloat() ?: 2048f
+            reduceMotion = settings?.optBoolean("reduce_motion", false) ?: false
+            selectedProfile = settings?.optString("selected_profile").orEmpty()
         }
+    }
+
+    fun selectProfile(name: String) {
+        selectedProfile = name
+        invoke(
+            JSONObject().put("action", "settings")
+                .put("settings", JSONObject().put("selected_profile", name))
+        )
     }
 
     Surface(modifier = Modifier.fillMaxSize(), color = Canvas) {
@@ -259,22 +356,26 @@ private fun RustCraftApp(gameDir: File, notify: (String) -> Unit) {
                 else Text("READY", color = Green, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.3.sp)
             }
 
-            AnimatedContent(targetState = page, label = "page-transition", modifier = Modifier.weight(1f)) { target ->
+            AnimatedContent(
+                targetState = page,
+                transitionSpec = {
+                    if (reduceMotion) EnterTransition.None togetherWith ExitTransition.None
+                    else fadeIn(tween(160)) togetherWith fadeOut(tween(120))
+                },
+                label = "page-transition",
+                modifier = Modifier.weight(1f),
+            ) { target ->
                 when (target) {
                     "Versions" -> VersionsPage(
                         versions = versions,
                         latest = latest,
                         selectedVersion = selectedVersion,
                         installedVersions = installedVersions,
+                        installing = installing,
                         query = versionQuery,
                         onQuery = { versionQuery = it },
                         onSelect = { selectedVersion = it },
-                        onInstall = {
-                            invoke(JSONObject().put("action", "install").put("id", selectedVersion)) {
-                                notify("$selectedVersion client downloaded and verified")
-                                refreshInstalledVersions()
-                            }
-                        },
+                        onInstall = { startInstall(selectedVersion) },
                     )
                     "Library" -> LibraryPage(
                         category = category,
@@ -286,17 +387,23 @@ private fun RustCraftApp(gameDir: File, notify: (String) -> Unit) {
                     "Settings" -> SettingsPage(
                         ram = ram,
                         onRamChange = { ram = it },
+                        reduceMotion = reduceMotion,
+                        onReduceMotion = { reduceMotion = it },
                         onSave = {
                             invoke(JSONObject().put("action", "settings")
-                                .put("settings", JSONObject().put("ram_mb", ram.toInt()))) {
-                                notify("RAM preference saved")
+                                .put("settings", JSONObject().put("ram_mb", ram.toInt())
+                                    .put("reduce_motion", reduceMotion))) {
+                                notify("Settings saved")
                             }
                         },
                     )
                     else -> HomePage(
                         latest = latest,
                         selectedProfile = selectedProfile,
+                        selectedVersion = selectedVersion,
+                        installed = selectedVersion in installedVersions,
                         onVersions = { page = "Versions" },
+                        onInstall = { startInstall(selectedVersion) },
                         onProfiles = { profileDialog = true },
                     )
                 }
@@ -329,48 +436,106 @@ private fun RustCraftApp(gameDir: File, notify: (String) -> Unit) {
     if (profileDialog) {
         AlertDialog(
             onDismissRequest = { profileDialog = false },
-            title = { Text("Offline profile") },
+            title = { Text("Player profiles · ${profiles.size}/3") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column(
+                    Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
                     if (profiles.isNotEmpty()) {
                         Text("SAVED PROFILES", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                         profiles.forEach { profile ->
                             Row(
                                 Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                                    .background(if (profile == selectedProfile) PaleGreen else Canvas)
+                                    .background(if (profile.name == selectedProfile) PaleGreen else Canvas)
                                     .clickable {
-                                        selectedProfile = profile
+                                        selectProfile(profile.name)
                                         profileDialog = false
                                     }
                                     .padding(12.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                Text(profile, modifier = Modifier.weight(1f), color = Ink)
-                                if (profile == selectedProfile) Icon(Icons.Rounded.Check, null, tint = Green)
+                                Column(Modifier.weight(1f)) {
+                                    Text(profile.name, color = Ink, fontWeight = FontWeight.SemiBold)
+                                    Text(profile.provider.uppercase(), color = Muted, fontSize = 9.sp)
+                                }
+                                if (profile.name == selectedProfile) Icon(Icons.Rounded.Check, null, tint = Green)
+                                androidx.compose.material3.IconButton(onClick = { pendingProfileDelete = profile.name }) {
+                                    Icon(Icons.Rounded.Delete, "Remove ${profile.name}", tint = Muted)
+                                }
                             }
                         }
                     }
-                    OutlinedTextField(
-                        value = profileName,
-                        onValueChange = { profileName = it },
-                        label = { Text("New player name") },
-                        singleLine = true,
-                    )
+                    Text("ACCOUNT TYPE", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf("microsoft" to "Microsoft", "ely.by" to "Ely.by", "offline" to "Offline").forEach { (id, label) ->
+                            if (accountProvider == id) {
+                                Button(
+                                    onClick = { accountProvider = id },
+                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 7.dp),
+                                ) { Text(label, fontSize = 11.sp) }
+                            } else {
+                                OutlinedButton(
+                                    onClick = { accountProvider = id },
+                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 7.dp),
+                                ) { Text(label, fontSize = 11.sp) }
+                            }
+                        }
+                    }
+                    if (accountProvider != "offline") {
+                        Text(
+                            "${
+                                if (accountProvider == "ely.by") "Ely.by" else "Microsoft"
+                            } authentication is not configured in this build. No sign-in or account token is simulated.",
+                            color = Muted,
+                            fontSize = 12.sp,
+                            lineHeight = 17.sp,
+                        )
+                    } else {
+                        OutlinedTextField(
+                            value = profileName,
+                            onValueChange = { profileName = it },
+                            label = { Text("New player name") },
+                            singleLine = true,
+                        )
+                    }
                 }
             },
             confirmButton = {
                 Button(onClick = {
-                    invoke(JSONObject().put("action", "add_profile").put("profile", profileName)) {
-                        selectedProfile = profileName
+                    invoke(JSONObject().put("action", "add_profile")
+                        .put("provider", accountProvider).put("profile", profileName)) {
+                        selectProfile(profileName)
                         profileName = ""
                         profileDialog = false
                         refreshProfiles()
                     }
-                }, enabled = profileName.isNotBlank()) { Text("Save profile") }
+                }, enabled = accountProvider == "offline" && profileName.isNotBlank() && profiles.size < 3) {
+                    Text("Add offline profile")
+                }
             },
             dismissButton = {
                 OutlinedButton(onClick = { profileDialog = false }) { Text("Cancel") }
             },
+        )
+    }
+
+    if (pendingProfileDelete != null) {
+        AlertDialog(
+            onDismissRequest = { pendingProfileDelete = null },
+            title = { Text("Remove profile?") },
+            text = { Text("Remove ${pendingProfileDelete.orEmpty()} from this launcher?") },
+            confirmButton = {
+                Button(onClick = {
+                    val name = pendingProfileDelete ?: return@Button
+                    pendingProfileDelete = null
+                    invoke(JSONObject().put("action", "remove_profile").put("profile", name)) {
+                        if (selectedProfile == name) selectProfile("")
+                        refreshProfiles()
+                    }
+                }) { Text("Remove") }
+            },
+            dismissButton = { OutlinedButton(onClick = { pendingProfileDelete = null }) { Text("Cancel") } },
         )
     }
 
@@ -390,6 +555,14 @@ private fun RustCraftApp(gameDir: File, notify: (String) -> Unit) {
             dismissButton = {
                 OutlinedButton(onClick = { pendingDelete = null }) { Text("Cancel") }
             },
+        )
+    }
+
+    if (showInstallProgress) {
+        InstallProgressDialog(
+            progress = installProgress,
+            running = installing,
+            onDismiss = { if (!installing) showInstallProgress = false },
         )
     }
 }
@@ -416,6 +589,9 @@ private fun BoxMark() {
 private fun HomePage(
     latest: String,
     selectedProfile: String,
+    selectedVersion: String,
+    installed: Boolean,
+    onInstall: () -> Unit,
     onVersions: () -> Unit,
     onProfiles: () -> Unit,
 ) {
@@ -423,26 +599,46 @@ private fun HomePage(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 22.dp),
         verticalArrangement = Arrangement.spacedBy(17.dp),
     ) {
-        Text("YOUR WORLD,\nYOUR WAY.", fontSize = 31.sp, lineHeight = 35.sp, fontWeight = FontWeight.Bold, color = Ink)
-        Text("A little launcher for a blocky world.", color = Muted, fontSize = 14.sp)
+        Text("Ready to build?", fontSize = 29.sp, fontWeight = FontWeight.Bold, color = Ink)
+        Text("Your vanilla launcher, ready for the next adventure.", color = Muted, fontSize = 14.sp)
 
-        Card(
-            shape = RoundedCornerShape(24.dp),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFFE7EEE5)),
+        Box(
+            Modifier.fillMaxWidth().height(205.dp).clip(RoundedCornerShape(23.dp))
         ) {
-            Column(Modifier.fillMaxWidth().padding(22.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            WorldArtwork(Modifier.fillMaxSize())
+            Column(
+                Modifier.align(Alignment.BottomStart).padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text("THE OVERWORLD", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp, letterSpacing = 1.4.sp)
+                Text("Make it yours.", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+
+        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
+            Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Rounded.Build, null, tint = Green)
-                    Spacer(Modifier.width(8.dp))
-                    Text("VANILLA VERSION", color = Green, fontWeight = FontWeight.Bold, fontSize = 11.sp, letterSpacing = 1.sp)
+                    Column(Modifier.weight(1f)) {
+                        Text("VANILLA JAVA", color = Green, fontWeight = FontWeight.Bold, fontSize = 10.sp, letterSpacing = 1.sp)
+                        Text(selectedVersion.ifBlank { latest }, color = Ink, fontSize = 25.sp, fontWeight = FontWeight.Bold)
+                    }
+                    OutlinedButton(onClick = onVersions) { Text("Change") }
                 }
-                Text(latest, color = Ink, fontSize = 30.sp, fontWeight = FontWeight.Bold)
-                Text("Mojang version catalog", color = Muted, fontSize = 13.sp)
-                Button(onClick = onVersions, shape = RoundedCornerShape(14.dp)) {
-                    Icon(Icons.AutoMirrored.Rounded.ArrowForward, null, modifier = Modifier.size(17.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("Browse versions")
+                Button(
+                    onClick = onInstall,
+                    enabled = !installed,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(14.dp),
+                ) {
+                    Text(if (installed) "CLIENT FILES DOWNLOADED" else "INSTALL $selectedVersion")
                 }
+                Text(
+                    if (installed) "The client JAR is verified. A compatible runtime is still required to play."
+                    else "Downloads and verifies the official client files. A game runtime is not included yet.",
+                    color = Muted,
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp,
+                )
             }
         }
 
@@ -481,11 +677,42 @@ private fun HomePage(
 }
 
 @Composable
+private fun WorldArtwork(modifier: Modifier = Modifier) {
+    androidx.compose.foundation.Canvas(modifier) {
+        drawRect(Color(0xFF91CFE0))
+        drawCircle(
+            Color(0xFFFFE7A1),
+            radius = size.minDimension * 0.1f,
+            center = androidx.compose.ui.geometry.Offset(size.width * 0.78f, size.height * 0.24f),
+        )
+        val farHill = androidx.compose.ui.graphics.Path().apply {
+            moveTo(0f, size.height * 0.67f)
+            lineTo(size.width * 0.27f, size.height * 0.32f)
+            lineTo(size.width * 0.5f, size.height * 0.68f)
+            lineTo(size.width * 0.72f, size.height * 0.39f)
+            lineTo(size.width, size.height * 0.67f)
+            lineTo(size.width, size.height)
+            lineTo(0f, size.height)
+            close()
+        }
+        drawPath(farHill, Color(0xFF789E79))
+        drawRect(Color(0xFF639257), topLeft = androidx.compose.ui.geometry.Offset(0f, size.height * 0.72f), size = androidx.compose.ui.geometry.Size(size.width, size.height * 0.28f))
+        drawRect(Color(0xFF477044), topLeft = androidx.compose.ui.geometry.Offset(size.width * 0.08f, size.height * 0.74f), size = androidx.compose.ui.geometry.Size(size.width * 0.22f, size.height * 0.14f))
+        drawRect(Color(0xFF527C49), topLeft = androidx.compose.ui.geometry.Offset(size.width * 0.68f, size.height * 0.7f), size = androidx.compose.ui.geometry.Size(size.width * 0.18f, size.height * 0.17f))
+        drawRect(Color(0xFF417040), topLeft = androidx.compose.ui.geometry.Offset(size.width * 0.76f, size.height * 0.65f), size = androidx.compose.ui.geometry.Size(size.width * 0.08f, size.height * 0.06f))
+        drawRect(Color(0xFFB88A5C), topLeft = androidx.compose.ui.geometry.Offset(size.width * 0.12f, size.height * 0.86f), size = androidx.compose.ui.geometry.Size(size.width * 0.26f, size.height * 0.14f))
+        drawRect(Color(0xFF9D714A), topLeft = androidx.compose.ui.geometry.Offset(size.width * 0.38f, size.height * 0.86f), size = androidx.compose.ui.geometry.Size(size.width * 0.2f, size.height * 0.14f))
+        drawRect(Color(0xFF6D9659), topLeft = androidx.compose.ui.geometry.Offset(size.width * 0.12f, size.height * 0.84f), size = androidx.compose.ui.geometry.Size(size.width * 0.26f, size.height * 0.035f))
+    }
+}
+
+@Composable
 private fun VersionsPage(
     versions: List<GameVersion>,
     latest: String,
     selectedVersion: String,
     installedVersions: List<String>,
+    installing: Boolean,
     query: String,
     onQuery: (String) -> Unit,
     onSelect: (String) -> Unit,
@@ -509,10 +736,10 @@ private fun VersionsPage(
         )
         Spacer(Modifier.height(8.dp))
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilledTonalButton(onClick = onInstall, enabled = selectedVersion.isNotBlank()) {
+            FilledTonalButton(onClick = onInstall, enabled = selectedVersion.isNotBlank() && !installing) {
                 Icon(Icons.AutoMirrored.Rounded.ArrowForward, null, modifier = Modifier.size(17.dp))
                 Spacer(Modifier.width(6.dp))
-                Text("Download client")
+                Text(if (installing) "Installing…" else "Install client")
             }
             Text("Selected: ${selectedVersion.ifBlank { latest }}", color = Muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
@@ -544,6 +771,51 @@ private fun VersionsPage(
             }
         }
     }
+}
+
+@Composable
+private fun InstallProgressDialog(
+    progress: InstallProgress,
+    running: Boolean,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Installing ${progress.version}") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(progress.message.ifBlank { "Preparing installation" }, color = Muted, fontSize = 13.sp)
+                androidx.compose.material3.LinearProgressIndicator(
+                    progress = { progress.percent.coerceIn(0, 100) / 100f },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = Green,
+                )
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("${progress.percent.coerceIn(0, 100)}%", fontWeight = FontWeight.Bold, color = Ink)
+                    Text(formatBytes(progress.bytesPerSecond) + "/s", color = Muted, fontSize = 12.sp)
+                }
+                Text(
+                    "${formatBytes(progress.downloadedBytes)} / ${formatBytes(progress.totalBytes)}",
+                    color = Muted,
+                    fontSize = 12.sp,
+                )
+                Text(
+                    when (progress.status) {
+                        "complete" -> "Verified client files. A compatible game runtime is still required."
+                        "failed" -> "Installation failed. You can try again."
+                        "verifying" -> "Checking Mojang SHA-1 checksums…"
+                        else -> progress.status.replaceFirstChar { it.uppercase() }
+                    },
+                    color = if (progress.status == "failed") Color(0xFFB3261E) else Muted,
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp,
+                )
+            }
+        },
+        confirmButton = {
+            if (!running) OutlinedButton(onClick = onDismiss) { Text("Close") }
+        },
+    )
 }
 
 @Composable
@@ -618,7 +890,13 @@ private fun LibraryPage(
 }
 
 @Composable
-private fun SettingsPage(ram: Float, onRamChange: (Float) -> Unit, onSave: () -> Unit) {
+private fun SettingsPage(
+    ram: Float,
+    onRamChange: (Float) -> Unit,
+    reduceMotion: Boolean,
+    onReduceMotion: (Boolean) -> Unit,
+    onSave: () -> Unit,
+) {
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
@@ -631,14 +909,21 @@ private fun SettingsPage(ram: Float, onRamChange: (Float) -> Unit, onSave: () ->
                 Text("${ram.toInt()} MB", fontSize = 23.sp, fontWeight = FontWeight.Bold, color = Ink)
                 Slider(value = ram, onValueChange = onRamChange, valueRange = 512f..8192f, steps = 30)
                 Text("Saved for a future game runtime. This does not change Android's memory limit.", color = Muted, fontSize = 12.sp)
-                Button(onClick = onSave) { Text("Save preference") }
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Reduce animations", color = Ink, fontWeight = FontWeight.Medium)
+                        Text("Use fewer page transitions.", color = Muted, fontSize = 11.sp)
+                    }
+                    Switch(checked = reduceMotion, onCheckedChange = onReduceMotion)
+                }
+                Button(onClick = onSave) { Text("Save settings") }
             }
         }
         Card(shape = RoundedCornerShape(21.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
             Column(Modifier.padding(19.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                 Text("ABOUT THIS BUILD", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
-                Text("RustCraft 0.1.0", color = Ink, fontWeight = FontWeight.SemiBold)
-                Text("Rust metadata and file-management core · Android 10+", color = Muted, fontSize = 12.sp)
+                Text("RustCraft 1.0.1", color = Ink, fontWeight = FontWeight.SemiBold)
+                Text("Rust download and profile core · Android 10+", color = Muted, fontSize = 12.sp)
             }
         }
     }

@@ -1,23 +1,28 @@
 # RustCraft Launcher
 
-RustCraft is an Android-first launcher foundation with a native Kotlin/Compose
-interface and a Rust core exposed over JNI. Its current working features are
-Mojang version-manifest browsing, checksum-verified vanilla client downloads,
-offline profiles, launcher settings, and app-private mod/resource-pack/shader
-file management.
+RustCraft is an Android-first launcher with a custom block-world interface and
+a Rust core exposed over JNI. It reads Mojang's live version manifest (which
+currently lists release 26.3), downloads the selected version metadata and
+client JAR, verifies Mojang's SHA-1 hashes, and reports download progress.
+Offline profiles, settings, and app-private mod/resource-pack/shader file
+management are also supported.
 
 > **Compatibility status:** This repository does not yet launch Minecraft.
 > A Java runtime for Android, game argument/classpath construction, Android
 > graphics/input integration, and native LWJGL support still need to be added.
 > Microsoft/Xbox authentication and Fabric/Forge installation are also not
-> implemented. The UI intentionally does not advertise these as working.
+> implemented. Microsoft and Ely.by are shown as account choices but sign-in
+> is not configured; no authentication is faked. The installer downloads the
+> client JAR and version metadata only, not the libraries/assets required to
+> run the game. The interface labels these limits explicitly.
 
 ## Architecture
 
 - `app/`: native Android application (minimum Android 10 / API 29), Compose UI,
   coroutine-based I/O, and app-scoped storage (no broad storage permission).
 - `rust/`: small synchronous Rust library; JNI commands handle version metadata,
-  verified client downloads, offline profiles, settings, and managed files.
+  verified client downloads and live progress, offline profiles, settings, and
+  managed files.
 - The game directory lives in the app's external files directory. Users can
   import files through Android's Storage Access Framework.
 
@@ -29,6 +34,11 @@ copying their implementation. Mojang's public version manifest is the source
 of vanilla version metadata. RustCraft is independent and is not affiliated
 with Mojang or Microsoft. Its visual design is original; it does not use
 Apple logos or imply Apple affiliation.
+
+[Horizon](https://github.com/horizon-rust/horizon) is separately licensed
+under LGPL-3.0-or-later and documents a desktop Linux/macOS/Windows Rust game
+engine, not an Android launcher library. Its game engine and UI are therefore
+not copied or linked into this Android project.
 
 ## Build
 
@@ -44,12 +54,14 @@ Prerequisites:
 ```sh
 rustup target add aarch64-linux-android armv7-linux-androideabi \
   x86_64-linux-android i686-linux-android
-./gradlew assembleDebug
+./gradlew assembleRelease
 ```
 
 The Android `preBuild` task compiles the Rust library for the four Android ABIs
-and packages it into the APK. Install the debug build with
-`adb install app/build/outputs/apk/debug/app-debug.apk`.
+and packages it into the APK. The release variant is R8-shrunk and signed with
+the local Android debug key for direct testing; use a private release keystore
+before publishing through an app store. Install it with
+`adb install app/build/outputs/apk/release/app-release.apk`.
 
 Rust core tests can be run on a host with `cargo test --manifest-path rust/Cargo.toml`.
 
@@ -60,8 +72,11 @@ removes these files if the app is uninstalled. No
 `MANAGE_EXTERNAL_STORAGE` permission is requested. Imported files are copied
 from the user's chosen document provider into the appropriate managed folder.
 Vanilla installation downloads the version JSON and client JAR and verifies
-the SHA-1 hashes published by Mojang before moving files into place. It does
-not download libraries/assets or make a version launchable yet.
+the SHA-1 hashes published by Mojang before moving files into place. Progress
+shows the current download stage, percentage, byte counts, and transfer rate.
+Up to three offline profiles can be stored. Microsoft and Ely.by account
+sign-in are not configured in this build. The launcher does not yet download
+libraries/assets or make a version launchable.
 
 ## License
 

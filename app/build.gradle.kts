@@ -16,8 +16,8 @@ android {
         applicationId = "com.rustcraft.launcher"
         minSdk = 29
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.0.1"
     }
 
     compileOptions {
@@ -31,6 +31,21 @@ android {
 
     buildFeatures {
         compose = true
+    }
+
+    buildTypes {
+        getByName("debug") {
+            isMinifyEnabled = false
+        }
+        getByName("release") {
+            signingConfig = signingConfigs.getByName("debug")
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+        }
     }
 
     sourceSets["main"].jniLibs.srcDir(rustJniLibs)
