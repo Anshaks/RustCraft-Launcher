@@ -9,6 +9,13 @@ navigation dock, screens, controls and transitions; it does not copy Horizon's
 launcher layouts, illustrations, typography or assets. The game engine remains
 an integrated NativeActivity using its Rust/wgpu renderer.
 
+The RustCraft first-run flow offers Android's Storage Access Framework (SAF)
+folder picker and persists a granted folder URI where Android permits it.
+Minecraft data remains in app-private storage unless a file is explicitly
+imported or exported; the app does not request broad storage access. Android's
+network capabilities are checked before a first engine installation: Wi-Fi
+starts normally, while cellular data requires confirmation.
+
 Immersive sticky fullscreen is enabled in the RustCraft launcher and game
 activity. System bars can be temporarily revealed with an edge swipe and hide
 again automatically. The native engine's Android screen hook reapplies the
@@ -21,6 +28,9 @@ player installs them from the in-app engine screen. A Java toolchain may be used
 on the build host by Horizon's asset-preparation tools. Its preparation step
 downloads a Mojang Java runtime to run resource exporters; this is build-only,
 is not copied into the APK, and is not used to start the game.
+The engine's downloaded client JAR is used as a source of the required
+Minecraft assets/data; it is not launched as Java bytecode. The native engine
+itself and its graphics/data dependencies are packaged with the APK.
 
 ## Features and current boundaries
 
@@ -33,6 +43,25 @@ is not copied into the APK, and is not used to start the game.
 - Native Rust Horizon Android engine with Vulkan and GLES paths, engine-managed
   26.3 resource installation, touch controls, game settings, offline accounts,
   Ely.by authentication, resource packs and Horizon-native mods.
+- First-run SAF folder selection with a persisted URI grant, cellular-data
+  confirmation before an incomplete initial install, and ZIP world import into
+  `saves/`. Imported paths are checked and existing worlds are never replaced.
+- Live install reporting from the native engine: downloaded/total MiB,
+  percentage, speed, ETA, install stage and current component filename.
+- Installer retries transient transfer failures, resumes the current component
+  with HTTP range requests when the host supports them, and keeps completed and
+  interrupted download files in app-private storage. A Retry action continues
+  after bounded automatic retries are exhausted.
+- Mojang manifest SHA-1 checks remain the publisher integrity check. After a
+  file passes that check, the installer also calculates a local SHA-256
+  receipt; Mojang does not publish SHA-256 values in the manifest, so the
+  receipt is not presented as a publisher-signed checksum.
+- Internet access is declared. `RECORD_AUDIO` is declared for native mods, but
+  Android runtime permission is requested only when an enabled native mod
+  declares microphone access (such as Voice Chat); it is not requested by
+  default.
+- RustCraft branding is applied to the native launcher surface, and the engine
+  dashboard no longer shows Discord/GitHub promotional buttons.
 - RustCraft's offline profile selection is handed to the native engine through
   its documented app-private launcher configuration file.
 - Horizon Android code and all third-party notices are included in the source
@@ -95,10 +124,13 @@ cargo +1.95.0 install cargo-ndk
 ./gradlew :app:assembleRelease
 ```
 
-The build prepares Horizon's pinned inputs on the host, compiles the Horizon
-native library for ARM64 with Horizon's optimized `fast` profile (opt-level 3,
-without expensive ThinLTO), stages the public engine data and license notices,
-and builds RustCraft's APK. Only `arm64-v8a` native libraries are packaged.
+The build prepares the pinned engine inputs on the host, compiles the Rust
+native library for ARM64 with the engine's optimized `fast` profile (opt-level
+3, without expensive ThinLTO), stages the public engine data and license
+notices, and builds RustCraft's APK. Build-time patches add durable resumable
+downloads, integrity receipts, component progress and RustCraft branding,
+then restore the upstream submodule sources. Only `arm64-v8a` native libraries
+are packaged.
 The local release build uses the Android debug signing key for testing; use a
 private, persistent release keystore for production updates.
 
@@ -106,6 +138,7 @@ private, persistent release keystore for production updates.
 
 ```sh
 cargo test --manifest-path rust/Cargo.toml
+python3 -m unittest discover -s tests -p 'test_*.py'
 python3 -m unittest discover -s engine/horizon-android/tests -p 'test_android*.py'
 ./gradlew :app:assembleRelease
 ```
@@ -117,11 +150,19 @@ artifacts are not published as GitHub Releases automatically.
 
 ## Account and game data
 
-Horizon stores accounts, profiles, worlds, settings, caches and game resources
-in the app's private Android storage. Offline profile names are local. Microsoft
+The engine stores accounts, profiles, worlds, settings and game resources in
+app-private Android storage. Download inputs stay in app-private files until
+installation succeeds, so Android cache eviction does not discard an
+interrupted download. Offline profile names are local. Microsoft
 and Ely.by credentials are handled by the engine's account flows; RustCraft
 does not store passwords or tokens itself. The first engine install downloads
 approximately 500 MiB according to the Android port documentation.
+
+The optional SAF folder grant is retained, but current engine/world data is
+still stored in app-private storage. The ZIP importer accepts a Java world
+archive containing `level.dat`; it extracts to a temporary directory, rejects
+unsafe paths, and moves the completed world to a unique name under `saves/`.
+App updates preserve app-private data, while uninstalling the app removes it.
 
 Minecraft is a trademark of Mojang Studios. RustCraft is independent and is not
 approved by or associated with Mojang or Microsoft.

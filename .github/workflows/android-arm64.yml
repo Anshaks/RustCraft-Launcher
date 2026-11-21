@@ -56,6 +56,9 @@ jobs:
       - name: Test launcher Rust core
         run: cargo test --manifest-path rust/Cargo.toml
 
+      - name: Test RustCraft Android engine patches
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
+
       - name: Test Horizon Android integration
         run: python3 -m unittest discover -s engine/horizon-android/tests -p 'test_android*.py'
 

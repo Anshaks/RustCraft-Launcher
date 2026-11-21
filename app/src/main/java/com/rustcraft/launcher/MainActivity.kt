@@ -1,7 +1,10 @@
 package com.rustcraft.launcher
 
-import android.net.Uri
+import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.net.Uri
 import android.os.Bundle
 import android.util.AtomicFile
 import android.widget.Toast
@@ -100,7 +103,10 @@ import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
+import java.util.UUID
+import java.util.zip.ZipInputStream
 
 private val Ink = Color(0xFFF4F0E7)
 private val Muted = Color(0xFF9AA1AF)
@@ -112,6 +118,9 @@ private val PanelRaised = Color(0xFF222832)
 private val Coral = Color(0xFFFF805C)
 private val Hairline = Color(0xFF343B47)
 private val DeepInk = Color(0xFF101218)
+private const val LauncherPreferences = "rustcraft_launcher"
+private const val StorageOnboardingComplete = "storage_onboarding_complete"
+private const val SharedFolderUri = "shared_folder_uri"
 
 internal data class GameVersion(val id: String, val type: String)
 internal data class ManagedFile(val name: String, val bytes: Long)
@@ -175,6 +184,18 @@ private fun RustCraftApp(gameDir: File, notify: (String) -> Unit) {
     var selectedProfile by remember { mutableStateOf("") }
     var accountProvider by remember { mutableStateOf("offline") }
     var reduceMotion by remember { mutableStateOf(false) }
+    val preferences = remember {
+        context.getSharedPreferences(LauncherPreferences, Context.MODE_PRIVATE)
+    }
+    var sharedFolderUri by remember {
+        mutableStateOf(preferences.getString(SharedFolderUri, null))
+    }
+    var showStorageOnboarding by remember {
+        mutableStateOf(!preferences.getBoolean(StorageOnboardingComplete, false))
+    }
+    var showMobileDataWarning by remember { mutableStateOf(false) }
+    var pendingEngineLaunch by remember { mutableStateOf(false) }
+    var importingWorld by remember { mutableStateOf(false) }
     var pendingDelete by remember { mutableStateOf<String?>(null) }
     var pendingProfileDelete by remember { mutableStateOf<String?>(null) }
     var versions by remember { mutableStateOf(listOf(GameVersion("26.3", "release"))) }
@@ -262,11 +283,20 @@ private fun RustCraftApp(gameDir: File, notify: (String) -> Unit) {
         )
     }
 
+    fun requestEngineOpen() {
+        if (isCellularNetwork(context) && !engineInstallationReady(context.filesDir)) {
+            pendingEngineLaunch = true
+            showMobileDataWarning = true
+        } else {
+            openEngine()
+        }
+    }
+
     fun chooseAccountProvider(provider: String) {
         accountProvider = provider
         if (provider != "offline") {
             profileDialog = false
-            openEngine()
+            requestEngineOpen()
         }
     }
 
@@ -307,7 +337,64 @@ private fun RustCraftApp(gameDir: File, notify: (String) -> Unit) {
         }
     }
 
+    val chooseSharedFolder = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree(),
+    ) { uri: Uri? ->
+        if (uri != null) {
+            try {
+                val readWrite = Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                try {
+                    context.contentResolver.takePersistableUriPermission(uri, readWrite)
+                } catch (_: SecurityException) {
+                    context.contentResolver.takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                    )
+                }
+                sharedFolderUri = uri.toString()
+                preferences.edit()
+                    .putBoolean(StorageOnboardingComplete, true)
+                    .putString(SharedFolderUri, uri.toString())
+                    .apply()
+                showStorageOnboarding = false
+                notify("Shared folder access saved")
+            } catch (error: SecurityException) {
+                notify("Folder access was not retained: ${error.message ?: "permission denied"}")
+            }
+        }
+    }
+
+    val importWorld = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri: Uri? ->
+        if (uri != null) {
+            scope.launch {
+                importingWorld = true
+                try {
+                    val importedName = withContext(Dispatchers.IO) {
+                        importWorldArchive(context, uri, File(context.filesDir, "saves"))
+                    }
+                    notify("World imported: $importedName")
+                } catch (error: Exception) {
+                    notify(error.message ?: "Could not import world archive")
+                } finally {
+                    importingWorld = false
+                }
+            }
+        }
+    }
+
     LaunchedEffect(Unit) {
+        val persisted = sharedFolderUri?.let { value ->
+            runCatching { Uri.parse(value) }.getOrNull()
+        }
+        if (persisted != null &&
+            context.contentResolver.persistedUriPermissions.none { it.uri == persisted }
+        ) {
+            sharedFolderUri = null
+            preferences.edit().remove(SharedFolderUri).apply()
+        }
         refreshProfiles()
         invoke(JSONObject().put("action", "settings")) { result ->
             val settings = result as? JSONObject
@@ -396,7 +483,7 @@ private fun RustCraftApp(gameDir: File, notify: (String) -> Unit) {
                         latest = latest,
                         selectedVersion = selectedVersion,
                         onSelect = { selectedVersion = it },
-                        onInstall = ::openEngine,
+                        onInstall = ::requestEngineOpen,
                     )
                     "Library" -> ContentLibraryPage(
                         category = category,
@@ -408,6 +495,10 @@ private fun RustCraftApp(gameDir: File, notify: (String) -> Unit) {
                     "Settings" -> LauncherSettingsPage(
                         reduceMotion = reduceMotion,
                         onReduceMotion = { reduceMotion = it },
+                        sharedFolder = sharedFolderUri != null,
+                        importingWorld = importingWorld,
+                        onChooseSharedFolder = { chooseSharedFolder.launch(null) },
+                        onImportWorld = { importWorld.launch(arrayOf("application/zip", "application/x-zip-compressed", "application/octet-stream")) },
                         onSave = {
                             invoke(JSONObject().put("action", "settings")
                                 .put("settings", JSONObject().put("reduce_motion", reduceMotion))) {
@@ -420,7 +511,7 @@ private fun RustCraftApp(gameDir: File, notify: (String) -> Unit) {
                         selectedProfile = selectedProfile,
                         selectedVersion = selectedVersion,
                         onVersions = { page = "Versions" },
-                        onInstall = ::openEngine,
+                        onInstall = ::requestEngineOpen,
                         onProfiles = { profileDialog = true },
                     )
                 }
@@ -542,6 +633,63 @@ private fun RustCraftApp(gameDir: File, notify: (String) -> Unit) {
             },
             dismissButton = {
                 OutlinedButton(onClick = { profileDialog = false }) { Text("Cancel") }
+            },
+        )
+    }
+
+    if (showStorageOnboarding) {
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("Choose your storage access") },
+            text = {
+                Text(
+                    "RustCraft keeps game data in Android app storage by default. Choose a shared folder with Android's system picker if you want persistent access to files there. No broad storage permission is used.",
+                )
+            },
+            confirmButton = {
+                Button(onClick = { chooseSharedFolder.launch(null) }) {
+                    Text("Choose shared folder")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = {
+                    preferences.edit().putBoolean(StorageOnboardingComplete, true).apply()
+                    showStorageOnboarding = false
+                }) {
+                    Text("Use app storage")
+                }
+            },
+        )
+    }
+
+    if (showMobileDataWarning) {
+        AlertDialog(
+            onDismissRequest = {
+                showMobileDataWarning = false
+                pendingEngineLaunch = false
+            },
+            title = { Text("Mobile data download") },
+            text = {
+                Text(
+                    "The Rust engine needs to download Minecraft 26.3 resources and may use a large amount of mobile data. Continue?",
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    showMobileDataWarning = false
+                    if (pendingEngineLaunch) openEngine()
+                    pendingEngineLaunch = false
+                }) {
+                    Text("OK · Continue")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = {
+                    showMobileDataWarning = false
+                    pendingEngineLaunch = false
+                }) {
+                    Text("Cancel")
+                }
             },
         )
     }
@@ -682,7 +830,7 @@ private fun HomePage(
             Column(Modifier.padding(19.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("A NOTE ON COMPATIBILITY", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
                 Text(
-                    "Horizon Android's native Rust engine is integrated for ARM64. Open the engine to download resources, manage game accounts and settings, or play.",
+                    "RustCraft's native ARM64 game engine downloads verified Minecraft resources, manages accounts and settings, and launches gameplay.",
                     color = Ink,
                     fontSize = 13.sp,
                     lineHeight = 19.sp,
@@ -884,7 +1032,132 @@ private fun SettingsPage(
     }
 }
 
-private fun queryDisplayName(context: android.content.Context, uri: Uri): String {
+private fun isCellularNetwork(context: Context): Boolean {
+    val manager = context.getSystemService(ConnectivityManager::class.java) ?: return false
+    val network = manager.activeNetwork ?: return false
+    val capabilities = manager.getNetworkCapabilities(network) ?: return false
+    return capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) &&
+        !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+}
+
+private fun engineInstallationReady(filesDir: File): Boolean {
+    return filesDir.resolve("engine-data.zip").isFile &&
+        filesDir.resolve(".local/horizon-client/26.3/android-downloads-v2.json").isFile
+}
+
+private fun importWorldArchive(context: Context, uri: Uri, savesDir: File): String {
+    require(queryDisplayName(context, uri).endsWith(".zip", ignoreCase = true)) {
+        "Choose a .zip world archive"
+    }
+    if (!savesDir.exists() && !savesDir.mkdirs()) {
+        throw IOException("Could not create the world's saves folder")
+    }
+
+    val stage = File(savesDir, ".rustcraft-import-${UUID.randomUUID()}")
+    if (!stage.mkdir()) throw IOException("Could not create a temporary import folder")
+
+    try {
+        var entries = 0
+        var expandedBytes = 0L
+        val buffer = ByteArray(64 * 1024)
+        val stream = context.contentResolver.openInputStream(uri)
+            ?: throw IOException("Could not open the selected ZIP archive")
+        ZipInputStream(stream.buffered()).use { zip ->
+            while (true) {
+                val entry = zip.nextEntry ?: break
+                entries++
+                if (entries > 100_000) throw IOException("World archive contains too many entries")
+
+                val rawName = entry.name
+                if (rawName.isBlank() || rawName.startsWith('/') || rawName.contains('\\') ||
+                    rawName.contains('\u0000')
+                ) {
+                    throw IOException("World archive contains an unsafe path")
+                }
+                val normalizedName = rawName.removeSuffix("/")
+                val parts = normalizedName.split('/')
+                if (parts.isEmpty() || parts.any { it == "." || it == ".." || it.isEmpty() }) {
+                    throw IOException("World archive contains an unsafe path")
+                }
+
+                val target = File(stage, parts.joinToString(File.separator))
+                val stagePath = stage.canonicalFile.toPath()
+                val targetPath = target.canonicalFile.toPath()
+                if (!targetPath.startsWith(stagePath)) {
+                    throw IOException("World archive path escapes its import folder")
+                }
+                if (entry.isDirectory) {
+                    if (!target.exists() && !target.mkdirs()) {
+                        throw IOException("Could not create a folder in the world archive")
+                    }
+                } else {
+                    val parent = target.parentFile
+                    if (parent != null && !parent.exists() && !parent.mkdirs()) {
+                        throw IOException("Could not create a folder in the world archive")
+                    }
+                    if (!target.createNewFile()) {
+                        throw IOException("World archive contains duplicate paths")
+                    }
+                    FileOutputStream(target).use { output ->
+                        while (true) {
+                            val count = zip.read(buffer)
+                            if (count < 0) break
+                            expandedBytes = Math.addExact(expandedBytes, count.toLong())
+                            if (expandedBytes > stage.usableSpace) {
+                                throw IOException("Not enough free storage to import this world")
+                            }
+                            output.write(buffer, 0, count)
+                        }
+                    }
+                }
+                zip.closeEntry()
+            }
+        }
+
+        val rootWorld = if (stage.resolve("level.dat").isFile) {
+            stage
+        } else {
+            val candidates = stage.listFiles()
+                .orEmpty()
+                .filter { it.isDirectory && it.resolve("level.dat").isFile }
+            if (candidates.size != 1) {
+                throw IOException("ZIP must contain one Java world with a level.dat file")
+            }
+            candidates.single()
+        }
+        val archiveName = queryDisplayName(context, uri)
+        val requestedName = if (rootWorld == stage) {
+            archiveName.removeSuffix(".zip").removeSuffix(".ZIP")
+        } else {
+            rootWorld.name
+        }
+        val destination = uniqueWorldDestination(savesDir, requestedName)
+        if (!rootWorld.renameTo(destination)) {
+            throw IOException("Could not move the imported world into saves")
+        }
+        return destination.name
+    } finally {
+        if (stage.exists() && !stage.deleteRecursively()) {
+            throw IOException("Could not clean up the temporary world import")
+        }
+    }
+}
+
+private fun uniqueWorldDestination(directory: File, requestedName: String): File {
+    val base = File(requestedName).name
+        .replace(Regex("[\\\\/:*?\"<>|\\u0000-\\u001F]"), "_")
+        .trim()
+        .ifBlank { "Imported World" }
+    var candidate = File(directory, base)
+    var suffix = 1
+    while (candidate.exists()) {
+        candidate = File(directory, "$base ($suffix)")
+        suffix++
+    }
+    return candidate
+}
+
+private fun queryDisplayName(context: Context, uri: Uri): String {
     val projection = arrayOf(android.provider.OpenableColumns.DISPLAY_NAME)
     context.contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
         if (cursor.moveToFirst()) {

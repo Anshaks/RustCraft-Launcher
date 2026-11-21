@@ -516,6 +516,10 @@ internal fun ContentLibraryPage(
 internal fun LauncherSettingsPage(
     reduceMotion: Boolean,
     onReduceMotion: (Boolean) -> Unit,
+    sharedFolder: Boolean,
+    importingWorld: Boolean,
+    onChooseSharedFolder: () -> Unit,
+    onImportWorld: () -> Unit,
     onSave: () -> Unit,
 ) {
     Column(
@@ -550,12 +554,61 @@ internal fun LauncherSettingsPage(
             border = BorderStroke(1.dp, Rule),
         ) {
             Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                Eyebrow("STORAGE  /  ANDROID SAF")
+                Text(
+                    if (sharedFolder) "Shared folder access is saved." else "Game data stays in app storage.",
+                    color = Bone,
+                    fontSize = 12.sp,
+                )
+                Text(
+                    "Android keeps game data private by default. RustCraft retains an optional SAF folder grant across app updates when Android permits it; no broad storage permission is requested.",
+                    color = Soft,
+                    fontSize = 10.sp,
+                    lineHeight = 15.sp,
+                )
+                OutlinedButton(onClick = onChooseSharedFolder) {
+                    Text(if (sharedFolder) "CHANGE SHARED FOLDER" else "CHOOSE SHARED FOLDER")
+                }
+                Eyebrow("WORLD DATA")
+                Text(
+                    "Import a Java world ZIP into the engine's saves folder. Existing worlds are never overwritten.",
+                    color = Soft,
+                    fontSize = 10.sp,
+                    lineHeight = 15.sp,
+                )
+                FilledTonalButton(onClick = onImportWorld, enabled = !importingWorld) {
+                    if (importingWorld) {
+                        androidx.compose.material3.CircularProgressIndicator(
+                            Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("IMPORTING WORLD")
+                    } else {
+                        Text("IMPORT WORLD ZIP")
+                    }
+                }
+            }
+        }
+
+        Surface(
+            shape = RoundedCornerShape(20.dp),
+            color = SurfaceLow,
+            border = BorderStroke(1.dp, Rule),
+        ) {
+            Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                 Eyebrow("ENGINE HANDOFF")
                 Text(
                     "Graphics, rendering, touch controls, accounts and gameplay settings are managed by the Rust game engine.",
                     color = Bone,
                     fontSize = 12.sp,
                     lineHeight = 18.sp,
+                )
+                Text(
+                    "Microphone access is not requested by default. Android asks only when an enabled native Voice Chat mod declares microphone access.",
+                    color = Soft,
+                    fontSize = 10.sp,
+                    lineHeight = 15.sp,
                 )
             }
         }
@@ -567,7 +620,7 @@ internal fun LauncherSettingsPage(
         ) {
             Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Eyebrow("ABOUT  /  CREDITS")
-                Text("RustCraft Launcher 1.1.0", color = Bone, fontWeight = FontWeight.Bold)
+                Text("RustCraft Launcher 1.2.0", color = Bone, fontWeight = FontWeight.Bold)
                 Text(
                     "Horizon Android Rust engine, MIT licensed. Engine and third-party notices are included with the app.",
                     color = Soft,
